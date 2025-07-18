@@ -9,9 +9,6 @@ numpy>=1.21.0
 # ログ機能
 colorlog>=6.7.0
 
-# データベース
-sqlite3  # 標準ライブラリ
-
 # Web関連
 flask>=2.3.0
 jinja2>=3.1.0

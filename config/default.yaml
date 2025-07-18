@@ -2,9 +2,9 @@
 
 # 入力ファイル設定
 input:
-  genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa)
-  transcriptome: ""    # トランスクリプトームファイル (.fsa_nt or .fa)
-  uniprot_db: ""       # UniProtデータベースファイル (.fasta)
+  genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa) - オプション (未指定の場合はtranscriptomeを使用)
+  transcriptome: ""    # トランスクリプトームファイル (.fsa_nt or .fa) - 必須
+  uniprot_db: ""       # UniProtデータベースファイル (.fasta) - 必須
 
 # 出力ディレクトリ設定
 output:
@@ -35,6 +35,8 @@ crispr:
   max_mismatch: 2
   threads: 10
   memory: "40g"
+  # 注意: genome_assemblyが指定されていない場合、オフターゲット検索にtranscriptomeを使用します
+  # この場合、ゲノム全体をカバーしないため、オフターゲット検索の精度が低下する可能性があります
 
 # GO解析設定
 go_analysis:

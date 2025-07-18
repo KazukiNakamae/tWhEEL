@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-レポート生成モジュール
-テキストサマリーとHTMLインタラクティブレポートの生成
+Report Generation Module
+Text summary and HTML interactive report generation
 """
 
 import os
@@ -15,14 +15,14 @@ import shutil
 
 
 class ReportGenerator:
-    """レポート生成処理クラス"""
+    """Report generation processing class"""
     
     def __init__(self, config):
         """
-        初期化
+        Initialize
         
         Args:
-            config (dict): 設定辞書
+            config (dict): Configuration dictionary
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ class ReportGenerator:
         self.web_data_dir = os.path.join(self.output_dir, 'web_data')
         
     def collect_all_results(self):
-        """すべてのステップの結果を収集"""
-        self.logger.info("すべてのステップの結果を収集中...")
+        """Collect results from all steps"""
+        self.logger.info("Collecting results from all steps...")
         
         results = {
             'timestamp': datetime.now().isoformat(),
@@ -42,7 +42,7 @@ class ReportGenerator:
             'data': {}
         }
         
-        # 各ステップの結果ファイルを収集
+        # Collect result files from each step
         result_files = {
             'gene_prediction': 'gene_prediction_results.txt',
             'annotation': 'annotation_results.txt',
@@ -55,7 +55,7 @@ class ReportGenerator:
             if os.path.exists(filepath):
                 results['files'][step] = filepath
         
-        # 主要データファイルの収集
+        # Collect main data files
         data_files = {
             'transcriptome': 'transcriptome.fa',
             'protein_sequences': 'query.pep',
@@ -73,14 +73,14 @@ class ReportGenerator:
             if os.path.exists(filepath):
                 results['data'][name] = filepath
         
-        # 統計情報の収集
+        # Collect statistics
         results['statistics'] = self._collect_statistics()
         
-        self.logger.info("結果の収集が完了しました")
+        self.logger.info("Results collection completed")
         return results
     
     def _collect_statistics(self):
-        """統計情報の収集"""
+        """Collect statistics information"""
         stats = {
             'gene_prediction': {},
             'annotation': {},
@@ -88,15 +88,15 @@ class ReportGenerator:
             'go_analysis': {}
         }
         
-        # 遺伝子予測統計
+        # Gene prediction statistics
         try:
             protein_path = os.path.join(self.intermediate_dir, 'query.pep')
             if os.path.exists(protein_path):
                 stats['gene_prediction']['protein_count'] = self._count_fasta_sequences(protein_path)
         except Exception as e:
-            self.logger.warning(f"遺伝子予測統計の収集エラー: {e}")
+            self.logger.warning(f"Gene prediction statistics collection error: {e}")
         
-        # アノテーション統計
+        # Annotation statistics
         try:
             annotation_path = os.path.join(self.intermediate_dir, 'annotation_classified.txt')
             if os.path.exists(annotation_path):
@@ -105,9 +105,9 @@ class ReportGenerator:
                 stats['annotation']['single_genes'] = single_count
                 stats['annotation']['total_genes'] = multi_count + single_count
         except Exception as e:
-            self.logger.warning(f"アノテーション統計の収集エラー: {e}")
+            self.logger.warning(f"Annotation statistics collection error: {e}")
         
-        # ガイド設計統計
+        # Guide design statistics
         try:
             multi_targets = os.path.join(self.intermediate_dir, 'multi_genes_targets_specific_clean.bed')
             single_targets = os.path.join(self.intermediate_dir, 'single_genes_targets_specific_clean.bed')
@@ -117,20 +117,20 @@ class ReportGenerator:
             if os.path.exists(single_targets):
                 stats['guide_design']['single_targets'] = self._count_lines(single_targets)
         except Exception as e:
-            self.logger.warning(f"ガイド設計統計の収集エラー: {e}")
+            self.logger.warning(f"Guide design statistics collection error: {e}")
         
-        # GO解析統計
+        # GO analysis statistics
         try:
             kfi_stat_path = os.path.join(self.intermediate_dir, 'go_kfi_stat.csv')
             if os.path.exists(kfi_stat_path):
                 stats['go_analysis'] = self._parse_go_kfi_stats(kfi_stat_path)
         except Exception as e:
-            self.logger.warning(f"GO解析統計の収集エラー: {e}")
+            self.logger.warning(f"GO analysis statistics collection error: {e}")
         
         return stats
     
     def _count_fasta_sequences(self, fasta_path):
-        """FASTAファイルの配列数をカウント"""
+        """Count number of sequences in FASTA file"""
         count = 0
         with open(fasta_path, 'r') as f:
             for line in f:
@@ -139,7 +139,7 @@ class ReportGenerator:
         return count
     
     def _count_gene_classifications(self, annotation_path):
-        """遺伝子分類のカウント"""
+        """Count gene classifications"""
         multi_count = 0
         single_count = 0
         
@@ -157,7 +157,7 @@ class ReportGenerator:
         return multi_count, single_count
     
     def _count_lines(self, filepath):
-        """ファイルの行数をカウント"""
+        """Count lines in file"""
         try:
             with open(filepath, 'r') as f:
                 return sum(1 for _ in f)
@@ -165,7 +165,7 @@ class ReportGenerator:
             return 0
     
     def _parse_go_kfi_stats(self, kfi_stat_path):
-        """GO-KFI統計の解析"""
+        """Parse GO-KFI statistics"""
         stats = {}
         
         try:
@@ -174,7 +174,7 @@ class ReportGenerator:
                 
             import re
             
-            # 基本統計を抽出
+            # Extract basic statistics
             pattern = r'F:(\d+\.?\d*)%\[S:(\d+\.?\d*)%,M:(\d+\.?\d*)%\],P:(\d+\.?\d*)%,N:(\d+\.?\d*)%,n:(\d+)'
             match = re.search(pattern, content)
             
@@ -187,95 +187,95 @@ class ReportGenerator:
                 stats['total_gos'] = int(match.group(6))
                 
         except Exception as e:
-            self.logger.warning(f"GO-KFI統計解析エラー: {e}")
+            self.logger.warning(f"GO-KFI statistics parsing error: {e}")
         
         return stats
     
     def generate_text_summary(self, results):
-        """テキストサマリーの生成"""
-        self.logger.info("テキストサマリーを生成中...")
+        """Generate text summary"""
+        self.logger.info("Generating text summary...")
         
         summary_path = os.path.join(self.output_dir, 'summary.txt')
         
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write("=" * 60 + "\n")
-            f.write("tWhEEL - トランスクリプトーム機能解析パイプライン\n")
-            f.write("実行サマリーレポート\n")
+            f.write("tWhEEL - Transcriptome Functional Analysis Pipeline\n")
+            f.write("Execution Summary Report\n")
             f.write("=" * 60 + "\n\n")
             
-            f.write(f"実行日時: {results['timestamp']}\n\n")
+            f.write(f"Execution Date: {results['timestamp']}\n\n")
             
-            # 処理統計
-            f.write("【処理統計】\n")
+            # Processing statistics
+            f.write("=== Processing Statistics ===\n")
             f.write("-" * 30 + "\n")
             
             stats = results['statistics']
             
-            # 遺伝子予測統計
+            # Gene prediction statistics
             if 'gene_prediction' in stats:
-                f.write(f"予測タンパク質数: {stats['gene_prediction'].get('protein_count', 'N/A')}\n")
+                f.write(f"Predicted proteins: {stats['gene_prediction'].get('protein_count', 'N/A')}\n")
             
-            # アノテーション統計
+            # Annotation statistics
             if 'annotation' in stats:
-                f.write(f"Multi遺伝子数: {stats['annotation'].get('multi_genes', 'N/A')}\n")
-                f.write(f"Single遺伝子数: {stats['annotation'].get('single_genes', 'N/A')}\n")
-                f.write(f"総遺伝子数: {stats['annotation'].get('total_genes', 'N/A')}\n")
+                f.write(f"Multi genes: {stats['annotation'].get('multi_genes', 'N/A')}\n")
+                f.write(f"Single genes: {stats['annotation'].get('single_genes', 'N/A')}\n")
+                f.write(f"Total genes: {stats['annotation'].get('total_genes', 'N/A')}\n")
             
-            # ガイド設計統計
+            # Guide design statistics
             if 'guide_design' in stats:
-                f.write(f"Multi遺伝子標的数: {stats['guide_design'].get('multi_targets', 'N/A')}\n")
-                f.write(f"Single遺伝子標的数: {stats['guide_design'].get('single_targets', 'N/A')}\n")
+                f.write(f"Multi gene targets: {stats['guide_design'].get('multi_targets', 'N/A')}\n")
+                f.write(f"Single gene targets: {stats['guide_design'].get('single_targets', 'N/A')}\n")
             
-            # GO解析統計
+            # GO analysis statistics
             if 'go_analysis' in stats:
                 go_stats = stats['go_analysis']
-                f.write(f"総GO term数: {go_stats.get('total_gos', 'N/A')}\n")
-                f.write(f"Fully targetable GO割合: {go_stats.get('fully_targetable_percent', 'N/A')}%\n")
-                f.write(f"Partially targetable GO割合: {go_stats.get('partially_targetable_percent', 'N/A')}%\n")
-                f.write(f"Not targetable GO割合: {go_stats.get('not_targetable_percent', 'N/A')}%\n")
+                f.write(f"Total GO terms: {go_stats.get('total_gos', 'N/A')}\n")
+                f.write(f"Fully targetable GO percentage: {go_stats.get('fully_targetable_percent', 'N/A')}%\n")
+                f.write(f"Partially targetable GO percentage: {go_stats.get('partially_targetable_percent', 'N/A')}%\n")
+                f.write(f"Not targetable GO percentage: {go_stats.get('not_targetable_percent', 'N/A')}%\n")
             
             f.write("\n")
             
-            # 設定情報
-            f.write("【設定情報】\n")
+            # Configuration information
+            f.write("=== Configuration Settings ===\n")
             f.write("-" * 30 + "\n")
-            f.write(f"入力ファイル:\n")
-            f.write(f"  - ゲノムアセンブリ: {results['config']['input'].get('genome_assembly', 'N/A')}\n")
-            f.write(f"  - トランスクリプトーム: {results['config']['input'].get('transcriptome', 'N/A')}\n")
-            f.write(f"  - UniProtデータベース: {results['config']['input'].get('uniprot_db', 'N/A')}\n")
-            f.write(f"PAMパターン: {results['config']['crispr'].get('pam_pattern', 'N/A')}\n")
-            f.write(f"最大ミスマッチ数: {results['config']['crispr'].get('max_mismatch', 'N/A')}\n")
-            f.write(f"BUSCOリネージ: {results['config']['busco'].get('lineage', 'N/A')}\n")
+            f.write(f"Input files:\n")
+            f.write(f"  - Genome assembly: {results['config']['input'].get('genome_assembly', 'N/A')}\n")
+            f.write(f"  - Transcriptome: {results['config']['input'].get('transcriptome', 'N/A')}\n")
+            f.write(f"  - UniProt database: {results['config']['input'].get('uniprot_db', 'N/A')}\n")
+            f.write(f"PAM pattern: {results['config']['crispr'].get('pam_pattern', 'N/A')}\n")
+            f.write(f"Max mismatch: {results['config']['crispr'].get('max_mismatch', 'N/A')}\n")
+            f.write(f"BUSCO lineage: {results['config']['busco'].get('lineage', 'N/A')}\n")
             
             f.write("\n")
             
-            # 出力ファイル
-            f.write("【出力ファイル】\n")
+            # Output files
+            f.write("=== Output Files ===\n")
             f.write("-" * 30 + "\n")
-            f.write(f"HTMLレポート: {os.path.join(self.output_dir, 'report.html')}\n")
-            f.write(f"Webデータ: {self.web_data_dir}\n")
-            f.write(f"中間ファイル: {self.intermediate_dir}\n")
+            f.write(f"HTML report: {os.path.join(self.output_dir, 'report.html')}\n")
+            f.write(f"Web data: {self.web_data_dir}\n")
+            f.write(f"Intermediate files: {self.intermediate_dir}\n")
             
             f.write("\n")
-            f.write("詳細な解析結果は HTMLレポート (report.html) をご覧ください。\n")
+            f.write("For detailed analysis results, please refer to the HTML report (report.html).\n")
         
-        self.logger.info(f"テキストサマリーを生成: {summary_path}")
+        self.logger.info(f"Text summary generated: {summary_path}")
         return summary_path
     
     def prepare_web_data(self, results):
-        """WebアプリケーションのためのデータをJSONとSQLiteで準備"""
-        self.logger.info("Webデータを準備中...")
+        """Prepare data for web application in JSON and SQLite formats"""
+        self.logger.info("Preparing web data...")
         
-        # SQLiteデータベースの作成
+        # Create SQLite database
         db_path = os.path.join(self.web_data_dir, 'twheel_data.db')
         
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # テーブルの作成
+        # Create tables
         self._create_database_tables(cursor)
         
-        # データの挿入
+        # Insert data
         self._insert_gene_data(cursor, results)
         self._insert_guide_data(cursor, results)
         self._insert_go_data(cursor, results)
@@ -283,7 +283,7 @@ class ReportGenerator:
         conn.commit()
         conn.close()
         
-        # JSON形式でも基本統計を保存
+        # Save basic statistics in JSON format
         json_data = {
             'timestamp': results['timestamp'],
             'statistics': results['statistics'],
@@ -298,13 +298,13 @@ class ReportGenerator:
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=2)
         
-        self.logger.info(f"Webデータを準備: {db_path}, {json_path}")
+        self.logger.info(f"Web data prepared: {db_path}, {json_path}")
         return db_path, json_path
     
     def _create_database_tables(self, cursor):
-        """データベーステーブルの作成"""
+        """Create database tables"""
         
-        # 遺伝子テーブル
+        # Gene table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS genes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,7 +320,7 @@ class ReportGenerator:
             )
         """)
         
-        # ガイドRNAテーブル
+        # Guide RNA table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS guide_rnas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -337,7 +337,7 @@ class ReportGenerator:
             )
         """)
         
-        # GO termテーブル
+        # GO term table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS go_terms (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -350,7 +350,7 @@ class ReportGenerator:
             )
         """)
         
-        # 遺伝子-GO関連テーブル
+        # Gene-GO relation table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS gene_go_relations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -362,7 +362,7 @@ class ReportGenerator:
         """)
     
     def _insert_gene_data(self, cursor, results):
-        """遺伝子データの挿入"""
+        """Insert gene data"""
         
         annotation_path = results['data'].get('annotation_table')
         if not annotation_path or not os.path.exists(annotation_path):
@@ -387,7 +387,7 @@ class ReportGenerator:
                     ))
     
     def _insert_guide_data(self, cursor, results):
-        """ガイドRNAデータの挿入"""
+        """Insert guide RNA data"""
         
         final_table_path = results['data'].get('final_annotation_guides')
         if not final_table_path or not os.path.exists(final_table_path):
@@ -398,11 +398,11 @@ class ReportGenerator:
             header = next(reader)
             
             for row in reader:
-                if len(row) >= 11 and row[-1]:  # guide_targets列が存在
+                if len(row) >= 11 and row[-1]:  # guide_targets column exists
                     unique_id = row[9]
                     guide_targets = row[-1]
                     
-                    # ガイド標的をパース
+                    # Parse guide targets
                     if guide_targets:
                         guides = guide_targets.split(',')
                         for guide in guides:
@@ -423,7 +423,7 @@ class ReportGenerator:
                                         guide_parts[5]
                                     ))
                     
-                    # 遺伝子のガイド数を更新
+                    # Update gene guide count
                     cursor.execute("""
                         UPDATE genes SET guide_count = (
                             SELECT COUNT(*) FROM guide_rnas WHERE gene_unique_id = ?
@@ -431,7 +431,7 @@ class ReportGenerator:
                     """, (unique_id, unique_id))
     
     def _insert_go_data(self, cursor, results):
-        """GO termデータの挿入"""
+        """Insert GO term data"""
         
         kfi_table_path = results['data'].get('go_kfi_table')
         if not kfi_table_path or not os.path.exists(kfi_table_path):
@@ -446,7 +446,7 @@ class ReportGenerator:
                     go_id = row[0]
                     kfi_score = float(row[4]) if row[4] else 0.0
                     
-                    # targetable_typeを判定
+                    # Determine targetable_type
                     if kfi_score == 1.0:
                         targetable_type = 'Fully'
                     elif kfi_score > 0.0:
@@ -461,36 +461,36 @@ class ReportGenerator:
                     """, (go_id, kfi_score, targetable_type, 0))
     
     def generate_html_report(self, results):
-        """HTMLレポートの生成"""
-        self.logger.info("HTMLレポートを生成中...")
+        """Generate HTML report"""
+        self.logger.info("Generating HTML report...")
         
-        # テンプレートファイルの作成
+        # Create template files
         self._create_html_template()
         self._create_css_files()
         self._create_js_files()
         
-        # メインHTMLファイルの生成
+        # Generate main HTML file
         html_path = os.path.join(self.output_dir, 'report.html')
         
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(self._generate_html_content(results))
         
-        self.logger.info(f"HTMLレポートを生成: {html_path}")
+        self.logger.info(f"HTML report generated: {html_path}")
         return html_path
     
     def _create_html_template(self):
-        """HTMLテンプレートの作成"""
+        """Create HTML template"""
         template_dir = os.path.join('src', 'web', 'templates')
         Path(template_dir).mkdir(parents=True, exist_ok=True)
         
-        # 基本テンプレートファイルは後で作成
+        # Basic template files will be created later
         pass
     
     def _create_css_files(self):
-        """CSSファイルの作成"""
+        """Create CSS files"""
         css_dir = os.path.join('src', 'web', 'static', 'css')
         
-        # メインCSSファイル
+        # Main CSS file
         main_css_path = os.path.join(css_dir, 'main.css')
         with open(main_css_path, 'w', encoding='utf-8') as f:
             f.write("""
@@ -686,10 +686,10 @@ body {
 """)
     
     def _create_js_files(self):
-        """JavaScriptファイルの作成"""
+        """Create JavaScript files"""
         js_dir = os.path.join('src', 'web', 'static', 'js')
         
-        # メインJSファイル
+        # Main JS file
         main_js_path = os.path.join(js_dir, 'main.js')
         with open(main_js_path, 'w', encoding='utf-8') as f:
             f.write("""
@@ -714,13 +714,13 @@ class tWhEELReport {
             this.data = await response.json();
             this.populateDashboard();
         } catch (error) {
-            console.error('データの読み込みに失敗しました:', error);
-            this.showError('データの読み込みに失敗しました');
+            console.error('Failed to load data:', error);
+            this.showError('Failed to load data');
         }
     }
     
     setupEventListeners() {
-        // タブ切り替え
+        // Tab switching
         document.querySelectorAll('.nav-tab').forEach(tab => {
             tab.addEventListener('click', (e) => {
                 const tabId = e.target.dataset.tab;
@@ -728,14 +728,14 @@ class tWhEELReport {
             });
         });
         
-        // 検索機能
+        // Search functionality
         document.addEventListener('input', (e) => {
             if (e.target.classList.contains('search-box')) {
                 this.handleSearch(e.target.value, e.target.dataset.target);
             }
         });
         
-        // フィルター機能
+        // Filter functionality
         document.addEventListener('change', (e) => {
             if (e.target.classList.contains('filter-select')) {
                 this.handleFilter(e.target.value, e.target.dataset.filter);
@@ -744,7 +744,7 @@ class tWhEELReport {
     }
     
     showTab(tabId) {
-        // タブの切り替え
+        // Tab switching
         document.querySelectorAll('.nav-tab').forEach(tab => {
             tab.classList.remove('active');
         });
@@ -757,7 +757,7 @@ class tWhEELReport {
         
         this.currentTab = tabId;
         
-        // タブ固有の初期化
+        // Tab-specific initialization
         switch(tabId) {
             case 'genes':
                 this.loadGeneData();
@@ -776,7 +776,7 @@ class tWhEELReport {
         
         const stats = this.data.statistics;
         
-        // 統計カードの更新
+        // Update statistics cards
         this.updateStatCard('protein-count', stats.gene_prediction?.protein_count || 0);
         this.updateStatCard('total-genes', stats.annotation?.total_genes || 0);
         this.updateStatCard('multi-genes', stats.annotation?.multi_genes || 0);
@@ -800,173 +800,173 @@ class tWhEELReport {
     }
     
     async loadGeneData() {
-        // 遺伝子データの読み込み（実装予定）
+        // Gene data loading (to be implemented)
         console.log('Loading gene data...');
     }
     
     async loadGuideData() {
-        // ガイドRNAデータの読み込み（実装予定）
+        // Guide RNA data loading (to be implemented)
         console.log('Loading guide data...');
     }
     
     async loadGOData() {
-        // GOデータの読み込み（実装予定）
+        // GO data loading (to be implemented)
         console.log('Loading GO data...');
     }
     
     handleSearch(query, target) {
-        // 検索機能（実装予定）
+        // Search functionality (to be implemented)
         console.log('Search:', query, 'Target:', target);
     }
     
     handleFilter(value, filter) {
-        // フィルター機能（実装予定）
+        // Filter functionality (to be implemented)
         console.log('Filter:', filter, 'Value:', value);
     }
 }
 
-// アプリケーションの初期化
+// Application initialization
 document.addEventListener('DOMContentLoaded', () => {
     new tWhEELReport();
 });
 """)
     
     def _generate_html_content(self, results):
-        """HTMLコンテンツの生成"""
+        """Generate HTML content"""
         stats = results['statistics']
         
         html_content = f"""
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>tWhEEL - トランスクリプトーム機能解析レポート</title>
+    <title>tWhEEL - Transcriptome Functional Analysis Report</title>
     <link rel="stylesheet" href="src/web/static/css/main.css">
 </head>
 <body>
     <div class="header">
         <div class="container">
             <h1>tWhEEL</h1>
-            <p>トランスクリプトーム機能解析パイプライン</p>
-            <p>実行日時: {results['timestamp']}</p>
+            <p>Transcriptome Workflow for Hierarchical Exploration and Expression Levels</p>
+            <p>Execution Date: {results['timestamp']}</p>
         </div>
     </div>
     
     <div class="container">
         <div class="nav-tabs">
-            <button class="nav-tab active" data-tab="dashboard">ダッシュボード</button>
-            <button class="nav-tab" data-tab="genes">遺伝子ブラウザ</button>
-            <button class="nav-tab" data-tab="guides">ガイドRNA</button>
-            <button class="nav-tab" data-tab="go-analysis">GO解析</button>
-            <button class="nav-tab" data-tab="settings">設定情報</button>
+            <button class="nav-tab active" data-tab="dashboard">Dashboard</button>
+            <button class="nav-tab" data-tab="genes">Gene Browser</button>
+            <button class="nav-tab" data-tab="guides">Guide RNA</button>
+            <button class="nav-tab" data-tab="go-analysis">GO Analysis</button>
+            <button class="nav-tab" data-tab="settings">Settings</button>
         </div>
         
-        <!-- ダッシュボード -->
+        <!-- Dashboard -->
         <div id="dashboard" class="tab-content active">
-            <h2>解析結果サマリー</h2>
+            <h2>Analysis Results Summary</h2>
             
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-value" id="protein-count">
                         {stats.get('gene_prediction', {}).get('protein_count', 0):,}
                     </div>
-                    <div class="stat-label">予測タンパク質数</div>
+                    <div class="stat-label">Predicted Proteins</div>
                 </div>
                 
                 <div class="stat-card">
                     <div class="stat-value" id="total-genes">
                         {stats.get('annotation', {}).get('total_genes', 0):,}
                     </div>
-                    <div class="stat-label">総遺伝子数</div>
+                    <div class="stat-label">Total Genes</div>
                 </div>
                 
                 <div class="stat-card">
                     <div class="stat-value" id="multi-genes">
                         {stats.get('annotation', {}).get('multi_genes', 0):,}
                     </div>
-                    <div class="stat-label">Multi遺伝子数</div>
+                    <div class="stat-label">Multi Genes</div>
                 </div>
                 
                 <div class="stat-card">
                     <div class="stat-value" id="single-genes">
                         {stats.get('annotation', {}).get('single_genes', 0):,}
                     </div>
-                    <div class="stat-label">Single遺伝子数</div>
+                    <div class="stat-label">Single Genes</div>
                 </div>
                 
                 <div class="stat-card">
                     <div class="stat-value" id="total-gos">
                         {stats.get('go_analysis', {}).get('total_gos', 0):,}
                     </div>
-                    <div class="stat-label">総GO term数</div>
+                    <div class="stat-label">Total GO Terms</div>
                 </div>
                 
                 <div class="stat-card">
                     <div class="stat-value" id="fully-targetable">
                         {stats.get('go_analysis', {}).get('fully_targetable_percent', 0):.1f}%
                     </div>
-                    <div class="stat-label">Fully targetable GO</div>
+                    <div class="stat-label">Fully Targetable GO</div>
                 </div>
             </div>
             
             <div class="chart-container">
-                <h3>GO Knock-out Feasibility分布</h3>
+                <h3>GO Knock-out Feasibility Distribution</h3>
                 <div id="go-kfi-chart">
-                    <p class="loading">チャートを読み込み中...</p>
+                    <p class="loading">Loading chart...</p>
                 </div>
             </div>
         </div>
         
-        <!-- 遺伝子ブラウザ -->
+        <!-- Gene Browser -->
         <div id="genes" class="tab-content">
-            <h2>遺伝子ブラウザ</h2>
+            <h2>Gene Browser</h2>
             
             <div class="filter-group">
-                <input type="text" class="search-box" placeholder="遺伝子名で検索..." data-target="genes">
+                <input type="text" class="search-box" placeholder="Search by gene name..." data-target="genes">
                 <select class="filter-select" data-filter="classification">
-                    <option value="">全て</option>
-                    <option value="Multi">Multi遺伝子</option>
-                    <option value="Single">Single遺伝子</option>
+                    <option value="">All</option>
+                    <option value="Multi">Multi Genes</option>
+                    <option value="Single">Single Genes</option>
                 </select>
                 <select class="filter-select" data-filter="guides">
-                    <option value="">全て</option>
-                    <option value="with-guides">ガイドRNAあり</option>
-                    <option value="without-guides">ガイドRNAなし</option>
+                    <option value="">All</option>
+                    <option value="with-guides">With Guide RNA</option>
+                    <option value="without-guides">Without Guide RNA</option>
                 </select>
             </div>
             
             <table class="data-table" id="genes-table">
                 <thead>
                     <tr>
-                        <th>遺伝子名</th>
-                        <th>分類</th>
+                        <th>Gene Name</th>
+                        <th>Classification</th>
                         <th>UniProt ID</th>
-                        <th>同一性</th>
-                        <th>E値</th>
-                        <th>ガイド数</th>
-                        <th>説明</th>
+                        <th>Identity</th>
+                        <th>E-value</th>
+                        <th>Guide Count</th>
+                        <th>Description</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td colspan="7" class="loading">データを読み込み中...</td>
+                        <td colspan="7" class="loading">Loading data...</td>
                     </tr>
                 </tbody>
             </table>
         </div>
         
-        <!-- ガイドRNA -->
+        <!-- Guide RNA -->
         <div id="guides" class="tab-content">
-            <h2>ガイドRNA設計結果</h2>
+            <h2>Guide RNA Design Results</h2>
             
             <div class="filter-group">
-                <input type="text" class="search-box" placeholder="ガイド配列で検索..." data-target="guides">
+                <input type="text" class="search-box" placeholder="Search by guide sequence..." data-target="guides">
                 <select class="filter-select" data-filter="chromosome">
-                    <option value="">全染色体</option>
+                    <option value="">All Chromosomes</option>
                 </select>
                 <select class="filter-select" data-filter="strand">
-                    <option value="">全ストランド</option>
+                    <option value="">All Strands</option>
                     <option value="+">+</option>
                     <option value="-">-</option>
                 </select>
@@ -975,31 +975,31 @@ document.addEventListener('DOMContentLoaded', () => {
             <table class="data-table" id="guides-table">
                 <thead>
                     <tr>
-                        <th>遺伝子</th>
-                        <th>染色体</th>
-                        <th>開始位置</th>
-                        <th>終了位置</th>
-                        <th>ガイド配列</th>
-                        <th>ストランド</th>
-                        <th>スコア</th>
+                        <th>Gene</th>
+                        <th>Chromosome</th>
+                        <th>Start</th>
+                        <th>End</th>
+                        <th>Guide Sequence</th>
+                        <th>Strand</th>
+                        <th>Score</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td colspan="7" class="loading">データを読み込み中...</td>
+                        <td colspan="7" class="loading">Loading data...</td>
                     </tr>
                 </tbody>
             </table>
         </div>
         
-        <!-- GO解析 -->
+        <!-- GO Analysis -->
         <div id="go-analysis" class="tab-content">
-            <h2>GO機能解析結果</h2>
+            <h2>GO Functional Analysis Results</h2>
             
             <div class="filter-group">
-                <input type="text" class="search-box" placeholder="GO termで検索..." data-target="go-terms">
+                <input type="text" class="search-box" placeholder="Search by GO term..." data-target="go-terms">
                 <select class="filter-select" data-filter="targetable">
-                    <option value="">全て</option>
+                    <option value="">All</option>
                     <option value="Fully">Fully targetable</option>
                     <option value="Partially">Partially targetable</option>
                     <option value="Not">Not targetable</option>
@@ -1010,48 +1010,48 @@ document.addEventListener('DOMContentLoaded', () => {
                 <thead>
                     <tr>
                         <th>GO ID</th>
-                        <th>GO名</th>
-                        <th>ネームスペース</th>
-                        <th>KFIスコア</th>
-                        <th>ターゲタブル</th>
-                        <th>遺伝子数</th>
+                        <th>GO Name</th>
+                        <th>Namespace</th>
+                        <th>KFI Score</th>
+                        <th>Targetable</th>
+                        <th>Gene Count</th>
                     </tr>
                 </thead>
                 <tbody>
                     <tr>
-                        <td colspan="6" class="loading">データを読み込み中...</td>
+                        <td colspan="6" class="loading">Loading data...</td>
                     </tr>
                 </tbody>
             </table>
         </div>
         
-        <!-- 設定情報 -->
+        <!-- Settings -->
         <div id="settings" class="tab-content">
-            <h2>設定情報</h2>
+            <h2>Configuration Settings</h2>
             
             <div class="setting-group">
-                <h3>入力ファイル</h3>
+                <h3>Input Files</h3>
                 <ul>
-                    <li><strong>ゲノムアセンブリ:</strong> {results['config']['input'].get('genome_assembly', 'N/A')}</li>
-                    <li><strong>トランスクリプトーム:</strong> {results['config']['input'].get('transcriptome', 'N/A')}</li>
-                    <li><strong>UniProtデータベース:</strong> {results['config']['input'].get('uniprot_db', 'N/A')}</li>
+                    <li><strong>Genome Assembly:</strong> {results['config']['input'].get('genome_assembly', 'N/A')}</li>
+                    <li><strong>Transcriptome:</strong> {results['config']['input'].get('transcriptome', 'N/A')}</li>
+                    <li><strong>UniProt Database:</strong> {results['config']['input'].get('uniprot_db', 'N/A')}</li>
                 </ul>
             </div>
             
             <div class="setting-group">
-                <h3>CRISPR設定</h3>
+                <h3>CRISPR Settings</h3>
                 <ul>
-                    <li><strong>PAMパターン:</strong> {results['config']['crispr'].get('pam_pattern', 'N/A')}</li>
-                    <li><strong>最大ミスマッチ数:</strong> {results['config']['crispr'].get('max_mismatch', 'N/A')}</li>
-                    <li><strong>スレッド数:</strong> {results['config']['crispr'].get('threads', 'N/A')}</li>
+                    <li><strong>PAM Pattern:</strong> {results['config']['crispr'].get('pam_pattern', 'N/A')}</li>
+                    <li><strong>Max Mismatch:</strong> {results['config']['crispr'].get('max_mismatch', 'N/A')}</li>
+                    <li><strong>Threads:</strong> {results['config']['crispr'].get('threads', 'N/A')}</li>
                 </ul>
             </div>
             
             <div class="setting-group">
-                <h3>BUSCO設定</h3>
+                <h3>BUSCO Settings</h3>
                 <ul>
-                    <li><strong>リネージ:</strong> {results['config']['busco'].get('lineage', 'N/A')}</li>
-                    <li><strong>CPU数:</strong> {results['config']['busco'].get('cpu', 'N/A')}</li>
+                    <li><strong>Lineage:</strong> {results['config']['busco'].get('lineage', 'N/A')}</li>
+                    <li><strong>CPU Count:</strong> {results['config']['busco'].get('cpu', 'N/A')}</li>
                 </ul>
             </div>
         </div>
@@ -1065,53 +1065,53 @@ document.addEventListener('DOMContentLoaded', () => {
         return html_content
     
     def run(self):
-        """レポート生成の全体実行"""
+        """Execute overall report generation"""
         try:
-            # 全結果の収集
+            # Collect all results
             results = self.collect_all_results()
             
-            # テキストサマリーの生成
+            # Generate text summary
             if self.config['report']['generate_summary']:
                 summary_path = self.generate_text_summary(results)
                 results['summary_path'] = summary_path
             
-            # Webデータの準備
+            # Prepare web data
             db_path, json_path = self.prepare_web_data(results)
             results['db_path'] = db_path
             results['json_path'] = json_path
             
-            # HTMLレポートの生成
+            # Generate HTML report
             if self.config['report']['generate_html']:
                 html_path = self.generate_html_report(results)
                 results['html_path'] = html_path
             
-            # 結果をファイルに保存
+            # Save results to file
             results_file = os.path.join(self.intermediate_dir, 'report_generation_results.txt')
             with open(results_file, 'w', encoding='utf-8') as f:
-                f.write("=== レポート生成結果 ===\n\n")
-                f.write(f"実行日時: {results['timestamp']}\n\n")
+                f.write("=== Report Generation Results ===\n\n")
+                f.write(f"Execution date: {results['timestamp']}\n\n")
                 
                 if 'summary_path' in results:
-                    f.write(f"テキストサマリー: {results['summary_path']}\n")
+                    f.write(f"Text summary: {results['summary_path']}\n")
                 
                 if 'html_path' in results:
-                    f.write(f"HTMLレポート: {results['html_path']}\n")
+                    f.write(f"HTML report: {results['html_path']}\n")
                 
-                f.write(f"SQLiteデータベース: {results['db_path']}\n")
-                f.write(f"JSONサマリー: {results['json_path']}\n\n")
+                f.write(f"SQLite database: {results['db_path']}\n")
+                f.write(f"JSON summary: {results['json_path']}\n\n")
                 
-                f.write("=== 統計情報 ===\n")
+                f.write("=== Statistics ===\n")
                 for category, stats in results['statistics'].items():
                     f.write(f"{category}:\n")
                     for key, value in stats.items():
                         f.write(f"  {key}: {value}\n")
                     f.write("\n")
             
-            self.logger.info(f"レポート生成結果を保存: {results_file}")
-            self.logger.info("レポート生成処理が完了しました")
+            self.logger.info(f"Report generation results saved: {results_file}")
+            self.logger.info("Report generation process completed")
             
             return results
             
         except Exception as e:
-            self.logger.error(f"レポート生成処理でエラーが発生しました: {e}")
+            self.logger.error(f"Error occurred during report generation: {e}")
             raise

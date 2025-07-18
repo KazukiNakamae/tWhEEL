@@ -27,26 +27,39 @@ class GuideDesign:
         self.intermediate_dir = self.config['output']['intermediate']
         
     def prepare_genome_assembly(self):
-        """ゲノムアセンブリファイルの準備"""
+        """ゲノムアセンブリファイルの準備（transcriptomeをフォールバックとして使用）"""
         genome_path = self.config['input']['genome_assembly']
         
         # 出力ファイルパス
-        output_path = os.path.join(self.intermediate_dir, 'genome_assembly.fa')
+        output_path = os.path.join(self.intermediate_dir, 'reference_for_offtarget.fa')
+        
+        # genome_assemblyが提供されているかチェック
+        if genome_path and os.path.exists(genome_path):
+            self.logger.info("Genome assembly provided - using for comprehensive off-target search")
+            source_path = genome_path
+            source_type = "genome assembly"
+        else:
+            # transcriptomeをフォールバックとして使用
+            transcriptome_path = self.config['input']['transcriptome']
+            self.logger.warning("Genome assembly not provided - using transcriptome for off-target search")
+            self.logger.warning("WARNING: Off-target search using transcriptome may be less comprehensive than using genome assembly")
+            source_path = transcriptome_path
+            source_type = "transcriptome"
         
         # ファイルの解凍とコピー
-        if genome_path.endswith('.gz'):
-            self.logger.info("ゲノムアセンブリファイルを解凍中...")
-            with gzip.open(genome_path, 'rb') as f_in:
+        if source_path.endswith('.gz'):
+            self.logger.info(f"Extracting {source_type} file...")
+            with gzip.open(source_path, 'rb') as f_in:
                 with open(output_path, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
         else:
-            self.logger.info("ゲノムアセンブリファイルをコピー中...")
-            shutil.copy2(genome_path, output_path)
+            self.logger.info(f"Copying {source_type} file...")
+            shutil.copy2(source_path, output_path)
         
         # 配列を1行にフォーマット
         self._format_fasta_oneline(output_path)
         
-        self.logger.info(f"ゲノムアセンブリの準備が完了: {output_path}")
+        self.logger.info(f"Reference sequence prepared for off-target search: {output_path}")
         return output_path
     
     def _format_fasta_oneline(self, fasta_path):

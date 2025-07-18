@@ -1,136 +1,141 @@
-# tWhEEL - トランスクリプトーム機能解析パイプライン
+# tWhEEL - Transcriptome Workflow for Hierarchical Exploration and Expression Levels
 
-**Transcriptome Workflow for Hierarchical Exploration and Expression Levels**
+**A comprehensive pipeline for transcriptome functional analysis and CRISPR target identification**
 
-tWhEELは、トランスクリプトアセンブリデータから遺伝子予測、機能アノテーション、CRISPRガイド設計、GO機能解析を行い、ノックアウト実験のためのターゲット遺伝子を特定するための包括的なパイプラインです。
+tWhEEL is a comprehensive pipeline that performs gene prediction, functional annotation, CRISPR guide design, and GO functional analysis from transcriptome assembly data to identify target genes for knockout experiments.
 
-## 特徴
+## Features
 
-- **遺伝子予測**: TransDecoderを使用したORF予測とBUSCO品質評価
-- **機能アノテーション**: UniProtデータベースに対するFASTA検索と遺伝子分類
-- **CRISPRガイド設計**: CrisFlashを使用したSpCas9ガイドRNA設計
-- **GO機能解析**: GO Knock-out Feasibility Index (GO-KF)の計算
-- **インタラクティブレポート**: HTMLベースのウェブレポート生成
-- **柔軟な設定**: YAMLベースの設定ファイル
+- **Gene Prediction**: ORF prediction using TransDecoder and BUSCO quality assessment
+- **Functional Annotation**: FASTA search against UniProt database and gene classification
+- **CRISPR Guide Design**: SpCas9 guide RNA design using CrisFlash
+- **GO Functional Analysis**: GO Knock-out Feasibility Index (GO-KF) calculation
+- **Interactive Reports**: HTML-based web report generation
+- **Flexible Configuration**: YAML-based configuration files
 
-## 必要な環境
+## Requirements
 
-- Python 3.8以上
+- Python 3.8 or higher
 - Docker
-- 必要なPythonパッケージ（requirements.txtを参照）
+- Required Python packages (see requirements.txt)
 
-## インストール
+## Installation
 
 ```bash
-# リポジトリをクローン
+# Clone the repository
 git clone https://github.com/KazukiNakamae/tWhEEL.git
 cd tWhEEL
 
-# 必要なパッケージをインストール
-pip install -r requirements.txt
+# Install required packages
+conda create -n twheel_env -y;
+conda activate twheel_env;
+conda install conda-forge::python=3.12 -y;
+python -m pip install -r requirements.txt;
 
-# 必要に応じてDockerイメージをビルド
+# Build Docker images if needed
 docker build -t kazukinakamae/add-go-columns:v1.0 src/docker/add_go_columns/
 docker build -t kazukinakamae/compute_go_kfi:v1.0 src/docker/compute_go_kfi/
 docker build -t kazukinakamae/count_go_parent_terms:v1.0 src/docker/count_go_parent_terms/
 ```
 
-## 使用方法
+## Usage
 
-### 1. 設定ファイルの準備
+### 1. Configuration File Setup
 
-`config/default.yaml`をコピーして、入力ファイルのパスを設定します：
+Copy `config/default.yaml` and set the input file paths:
 
 ```yaml
 input:
-  genome_assembly: "/path/to/genome.fna"
-  transcriptome: "/path/to/transcriptome.fsa_nt"
-  uniprot_db: "/path/to/uniprot_sprot.fasta"
+  transcriptome: "/path/to/transcriptome.fsa_nt"  # Required
+  uniprot_db: "/path/to/uniprot_sprot.fasta"  # Required
+  genome_assembly: "/path/to/genome.fna"  # Optional - uses transcriptome if not provided
 ```
 
-### 2. 実行
+**Note**: The `genome_assembly` parameter is optional. If not provided, the pipeline will use the transcriptome for off-target analysis, though this may be less comprehensive than using a genome assembly.
+
+### 2. Execution
 
 ```bash
-# 全ステップを実行
+# Run all steps
 python src/twheel.py --config config/my_config.yaml
 
-# 特定のステップのみ実行
+# Run specific step only
 python src/twheel.py --config config/my_config.yaml --step annotation
 
-# 利用可能なステップを確認
+# Check available steps
 python src/twheel.py --list-steps
 ```
 
-### 3. 結果の確認
+### 3. Output Files
 
-実行後、以下のファイルが生成されます：
+After execution, the following files are generated:
 
-- `outputs/summary.txt`: テキストサマリー
-- `outputs/report.html`: HTMLインタラクティブレポート
-- `outputs/web_data/`: Webアプリケーション用データ
-- `outputs/intermediate/`: 中間ファイル
+- `outputs/summary.txt`: Text summary
+- `outputs/report.html`: HTML interactive report
+- `outputs/web_data/`: Web application data
+- `outputs/intermediate/`: Intermediate files
 
-## パイプライン構成
+## Pipeline Structure
 
-### 1. 遺伝子予測 (gene_prediction)
-- **TransDecoder**: ORF予測とタンパク質配列生成
-- **BUSCO**: アセンブリ品質評価
-- **seqkit**: 配列統計情報の取得
+### 1. Gene Prediction (gene_prediction)
+- **TransDecoder**: ORF prediction and protein sequence generation
+- **BUSCO**: Assembly quality assessment
+- **seqkit**: Sequence statistics
 
-### 2. アノテーション (annotation)
-- **FASTA検索**: UniProtデータベースに対するggsearch36
-- **遺伝子分類**: Multi/Single遺伝子の分類
-- **配列抽出**: 分類された遺伝子配列の抽出
+### 2. Annotation (annotation)
+- **FASTA Search**: ggsearch36 against UniProt database
+- **Gene Classification**: Multi/Single gene classification
+- **Sequence Extraction**: Classified gene sequence extraction
 
-### 3. ガイド設計 (guide_design)
-- **CrisFlash**: SpCas9用ガイドRNA設計
-- **サイト特異性**: 特異的標的の抽出とフィルタリング
-- **アノテーション統合**: ガイド情報とアノテーションの結合
+### 3. Guide Design (guide_design)
+- **CrisFlash**: SpCas9 guide RNA design
+- **Site Specificity**: Specific target extraction and filtering
+- **Annotation Integration**: Guide information and annotation integration
 
-### 4. GO解析 (go_analysis)
-- **GOアノテーション**: UniProt IDからのGO term取得
-- **GO-KFI計算**: ノックアウト実行可能性指数の計算
-- **機能分類**: Fully/Partially/Not targetableの分類
+### 4. GO Analysis (go_analysis)
+- **GO Annotation**: GO term retrieval from UniProt IDs
+- **GO-KFI Calculation**: Knockout feasibility index calculation
+- **Functional Classification**: Fully/Partially/Not targetable classification
 
-### 5. レポート生成 (report_generation)
-- **テキストサマリー**: 実行統計とサマリー
-- **HTMLレポート**: インタラクティブなウェブレポート
-- **データベース**: SQLiteとJSON形式でのデータ保存
+### 5. Report Generation (report_generation)
+- **Text Summary**: Execution statistics and summary
+- **HTML Report**: Interactive web report
+- **Database**: SQLite and JSON format data storage
 
-## 出力ファイル
+## Output Files
 
-### 主要出力
-- `summary.txt`: 実行サマリー
-- `report.html`: HTMLレポート
-- `web_data/twheel_data.db`: SQLiteデータベース
-- `web_data/summary.json`: JSON形式の統計情報
+### Main Outputs
+- `summary.txt`: Execution summary
+- `report.html`: HTML report
+- `web_data/twheel_data.db`: SQLite database
+- `web_data/summary.json`: JSON format statistics
 
-### 中間ファイル
-- `intermediate/query.pep`: 予測タンパク質配列
-- `intermediate/annotation_classified.txt`: 分類されたアノテーション
-- `intermediate/annotation_with_guides_final.tsv`: ガイド情報統合結果
-- `intermediate/go_kfi_table.csv`: GO-KFIテーブル
-- `intermediate/go_parent_counts.png`: GO階層可視化
+### Intermediate Files
+- `intermediate/query.pep`: Predicted protein sequences
+- `intermediate/annotation_classified.txt`: Classified annotations
+- `intermediate/annotation_with_guides_final.tsv`: Guide information integration results
+- `intermediate/go_kfi_table.csv`: GO-KFI table
+- `intermediate/go_parent_counts.png`: GO hierarchy visualization
 
-## 設定オプション
+## Configuration Options
 
-### 入力設定
+### Input Settings
 ```yaml
 input:
-  genome_assembly: ""  # ゲノムアセンブリファイル
-  transcriptome: ""    # トランスクリプトームファイル
-  uniprot_db: ""       # UniProtデータベース
+  genome_assembly: ""  # Genome assembly file
+  transcriptome: ""    # Transcriptome file
+  uniprot_db: ""       # UniProt database
 ```
 
-### CRISPR設定
+### CRISPR Settings
 ```yaml
 crispr:
-  pam_pattern: "NGG"   # PAMパターン
-  max_mismatch: 2      # 最大ミスマッチ数
-  threads: 10          # スレッド数
+  pam_pattern: "NGG"   # PAM pattern
+  max_mismatch: 2      # Maximum mismatch count
+  threads: 10          # Thread count
 ```
 
-### GO解析設定
+### GO Analysis Settings
 ```yaml
 go_analysis:
   add_go_image: "kazukinakamae/add-go-columns:v1.0"
@@ -138,78 +143,78 @@ go_analysis:
   count_parent_image: "kazukinakamae/count_go_parent_terms:v1.0"
 ```
 
-## HTMLレポート機能
+## HTML Report Features
 
-生成されるHTMLレポートには以下の機能が含まれます：
+The generated HTML report includes the following features:
 
-### ダッシュボード
-- 処理統計のサマリー
-- GO Knock-out Feasibility分布グラフ
+### Dashboard
+- Processing statistics summary
+- GO Knock-out Feasibility distribution graph
 
-### 遺伝子ブラウザ
-- Multi/Single遺伝子の検索・フィルタリング
-- UniProt ID、同一性、E値の表示
-- ガイドRNA数の表示
+### Gene Browser
+- Multi/Single gene search and filtering
+- UniProt ID, identity, E-value display
+- Guide RNA count display
 
-### ガイドRNA
-- 設計されたガイドRNAの一覧
-- 染色体位置、配列、ストランド情報
-- 検索・フィルタリング機能
+### Guide RNA
+- List of designed guide RNAs
+- Chromosome position, sequence, strand information
+- Search and filtering functionality
 
-### GO解析
-- GO termの検索・フィルタリング
-- KFIスコアによる分類
-- ターゲタブル分類の表示
+### GO Analysis
+- GO term search and filtering
+- KFI score-based classification
+- Targetable classification display
 
-## トラブルシューティング
+## Troubleshooting
 
-### Docker関連の問題
+### Docker-related Issues
 ```bash
-# Dockerイメージが見つからない場合
+# If Docker image not found
 docker build -t kazukinakamae/add-go-columns:v1.0 src/docker/add_go_columns/
 
-# 権限の問題
+# Permission issues
 sudo usermod -aG docker $USER
 ```
 
-### メモリ不足の問題
+### Memory Issues
 ```yaml
-# 設定ファイルでメモリ使用量を調整
+# Adjust memory usage in configuration file
 crispr:
-  memory: "20g"  # メモリ使用量を削減
+  memory: "20g"  # Reduce memory usage
 ```
 
-### パフォーマンス調整
+### Performance Tuning
 ```yaml
-# CPU使用量の調整
+# Adjust CPU usage
 crispr:
-  threads: 4     # スレッド数を削減
+  threads: 4     # Reduce thread count
 busco:
-  cpu: 4         # CPU数を削減
+  cpu: 4         # Reduce CPU count
 ```
 
-## 参考文献
+## References
 
 - **TransDecoder**: Haas et al. (2013) Nature Protocols
 - **BUSCO**: Simão et al. (2015) Bioinformatics
-- **CrisFlash**: Nakamae et al. (2024) *準備中*
+- **CrisFlash**: Nakamae et al. (2024) *In preparation*
 - **UniProt**: UniProt Consortium (2023) Nucleic Acids Research
 
-## ライセンス
+## License
 
-このプロジェクトはMITライセンスの下で公開されています。詳細は[LICENSE](LICENSE)ファイルを参照してください。
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-## 貢献
+## Contributing
 
-プロジェクトへの貢献を歓迎します。バグ報告や機能要求はIssuesページから、コードの改善はPull Requestからお願いします。
+We welcome contributions to the project. Please submit bug reports and feature requests through the Issues page, and code improvements through Pull Requests.
 
-## 作成者
+## Author
 
 - **Kazuki Nakamae** - [GitHub](https://github.com/KazukiNakamae)
 
-## 更新履歴
+## Changelog
 
-- **v1.0.0** (2025-01-18): 初回リリース
-  - 基本パイプライン機能
-  - HTMLレポート生成
-  - GO-KFI計算
+- **v1.0.0** (2025-01-18): Initial release
+  - Basic pipeline functionality
+  - HTML report generation
+  - GO-KFI calculation
