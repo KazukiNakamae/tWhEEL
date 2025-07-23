@@ -437,34 +437,74 @@ class ReportGenerator:
             
             f.write(f"Execution Date: {results['timestamp']}\n\n")
             
-            # Processing statistics
+            # Processing statistics - matching HTML report statistics cards
             f.write("=== Processing Statistics ===\n")
             f.write("-" * 30 + "\n")
             
             stats = results['statistics']
             
-            # Gene prediction statistics
+            # General Statistics (matching HTML report table)
+            f.write("== General Statistics ==\n")
             if 'gene_prediction' in stats:
-                f.write(f"Protein Annotated Contigs: {stats['gene_prediction'].get('protein_count', 'N/A')}\n")
+                f.write(f"Total transcripts: {stats['gene_prediction'].get('transcript_count', 'N/A'):,}\n")
+                f.write(f"Protein Annotated Contigs: {stats['gene_prediction'].get('protein_count', 'N/A'):,}\n")
             
-            # Annotation statistics
             if 'annotation' in stats:
-                f.write(f"Multi (Redundant) Contigs</div>: {stats['annotation'].get('multi_genes', 'N/A')}\n")
-                f.write(f"Single (Non-Redundant) Contigs: {stats['annotation'].get('single_genes', 'N/A')}\n")
-                f.write(f"Total Annotated Contigs: {stats['annotation'].get('total_genes', 'N/A')}\n")
+                f.write(f"Total Annotated Contigs: {stats['annotation'].get('total_genes', 'N/A'):,}\n")
+                f.write(f"Multi (Redundant) Contigs: {stats['annotation'].get('multi_genes', 'N/A'):,}\n")
+                f.write(f"Single (Non-Redundant) Contigs: {stats['annotation'].get('single_genes', 'N/A'):,}\n")
             
-            # Guide design statistics
-            if 'guide_design' in stats:
-                f.write(f"Multi (Redundant) Contig Targets: {stats['guide_design'].get('multi_targets', 'N/A')}\n")
-                f.write(f"Single (Non-Redundant) Contig Targets: {stats['guide_design'].get('single_targets', 'N/A')}\n")
-            
-            # GO analysis statistics
             if 'go_analysis' in stats:
                 go_stats = stats['go_analysis']
-                f.write(f"Total GO terms: {go_stats.get('total_gos', 'N/A')}\n")
-                f.write(f"Fully targetable GO percentage: {go_stats.get('fully_targetable_percent', 'N/A')}%\n")
-                f.write(f"Partially targetable GO percentage: {go_stats.get('partially_targetable_percent', 'N/A')}%\n")
-                f.write(f"Not targetable GO percentage: {go_stats.get('not_targetable_percent', 'N/A')}%\n")
+                f.write(f"Total GO terms: {go_stats.get('total_gos', 'N/A'):,}\n")
+                f.write(f"Targetable GO Terms: {go_stats.get('fully_targetable_percent', 'N/A')}%\n")
+            
+            f.write("\n")
+            
+            # Gene Prediction Statistics (matching HTML report cards)
+            f.write("== Gene Prediction Statistics ==\n")
+            if 'gene_prediction' in stats:
+                protein_stats = stats['gene_prediction'].get('protein_stats', {})
+                f.write(f"Total Predicted Proteins: {stats['gene_prediction'].get('protein_count', 'N/A'):,}\n")
+                f.write(f"Average Protein Length (AA): {protein_stats.get('avg_length', 'N/A')}\n")
+                f.write(f"Longest Protein (AA): {protein_stats.get('max_length', 'N/A'):,}\n")
+            
+            f.write("\n")
+            
+            # Guide RNA Design Statistics (matching HTML report cards)
+            f.write("== Guide RNA Design Statistics ==\n")
+            if 'guide_design' in stats:
+                f.write(f"Total Guides: {stats['guide_design'].get('total_guides', 'N/A'):,}\n")
+                f.write(f"Site-Specific Guides: {stats['guide_design'].get('site_specific_guides', 'N/A'):,}\n")
+                f.write(f"Site-Specific Multi-Target Guides: {stats['guide_design'].get('site_specific_multi_target', 'N/A'):,}\n")
+                f.write(f"Site-Specific Single-Target Guides: {stats['guide_design'].get('site_specific_single_target', 'N/A'):,}\n")
+                f.write(f"Multi (Redundant) Contig Targets: {stats['guide_design'].get('multi_targets', 'N/A'):,}\n")
+                f.write(f"Single (Non-Redundant) Contig Targets: {stats['guide_design'].get('single_targets', 'N/A'):,}\n")
+            
+            f.write("\n")
+            
+            # GO-KFI Assessment Statistics (matching HTML report cards)
+            f.write("== GO-KFI Assessment Statistics ==\n")
+            if 'go_analysis' in stats:
+                go_stats = stats['go_analysis']
+                f.write(f"Total GO terms: {go_stats.get('total_gos', 'N/A'):,}\n")
+                f.write(f"Fully Targetable GO terms: {go_stats.get('fully_targetable_percent', 'N/A')}%\n")
+                f.write(f"Fully and Simply Targetable GO terms: {go_stats.get('simply_targetable_percent', 'N/A')}%\n")
+                f.write(f"Fully and Multiply Targetable GO terms: {go_stats.get('multiply_targetable_percent', 'N/A')}%\n")
+                f.write(f"Partially Targetable GO terms: {go_stats.get('partially_targetable_percent', 'N/A')}%\n")
+                f.write(f"Not Targetable GO terms: {go_stats.get('not_targetable_percent', 'N/A')}%\n")
+                
+                # Add count information if available
+                if 'fully_targetable_count' in go_stats:
+                    f.write(f"Fully Targetable GO count: {go_stats.get('fully_targetable_count', 'N/A'):,}\n")
+                if 'simply_targetable_count' in go_stats:
+                    f.write(f"Simply Targetable GO count: {go_stats.get('simply_targetable_count', 'N/A'):,}\n")
+                if 'multiply_targetable_count' in go_stats:
+                    f.write(f"Multiply Targetable GO count: {go_stats.get('multiply_targetable_count', 'N/A'):,}\n")
+                if 'partially_targetable_count' in go_stats:
+                    f.write(f"Partially Targetable GO count: {go_stats.get('partially_targetable_count', 'N/A'):,}\n")
+                if 'not_targetable_count' in go_stats:
+                    f.write(f"Not Targetable GO count: {go_stats.get('not_targetable_count', 'N/A'):,}\n")
             
             f.write("\n")
             
