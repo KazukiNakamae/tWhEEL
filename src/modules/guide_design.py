@@ -89,21 +89,115 @@ class GuideDesign:
         shutil.move(temp_path, fasta_path)
         self.logger.debug("FASTAファイルを1行形式に変換しました")
     
+    def _prepare_multi_genes_aligned(self, aligned_dir):
+        """Multi遺伝子アライメント済みファイルを統合"""
+        self.logger.info("Multi遺伝子アライメント済みファイルを統合中...")
+        
+        aligned_dir_path = Path(aligned_dir)
+        
+        # アライメント済みファイルを探す
+        aligned_files = list(aligned_dir_path.glob("*_aligned_consensus.fa"))
+        
+        if not aligned_files:
+            self.logger.warning("アライメント済みファイルが見つかりません")
+            return None
+        
+        self.logger.info(f"見つかったアライメント済みファイル数: {len(aligned_files)}")
+        
+        # 一時的なoneliner形式ファイルを作成するディレクトリ
+        oneline_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned_oneline')
+        Path(oneline_dir).mkdir(parents=True, exist_ok=True)
+        
+        # 各ファイルを1行形式に変換
+        oneline_files = []
+        for aligned_file in aligned_files:
+            # 出力ファイル名
+            oneline_filename = aligned_file.name
+            oneline_path = os.path.join(oneline_dir, oneline_filename)
+            
+            # 1行形式に変換
+            self._convert_to_oneline_format(aligned_file, oneline_path)
+            oneline_files.append(oneline_path)
+            
+            self.logger.debug(f"1行形式変換完了: {oneline_filename}")
+        
+        # 全てのファイルを統合
+        combined_path = os.path.join(self.intermediate_dir, 'multi_genes_aligned_oneline.fa')
+        
+        with open(combined_path, 'w') as f_out:
+            for oneline_file in oneline_files:
+                # ファイル名からベース名を抽出（拡張子を除去）
+                base_name = Path(oneline_file).stem
+                
+                # ヘッダーとWindowsのCR対策を適用して統合
+                self._merge_file_with_header_replacement(oneline_file, base_name, f_out)
+        
+        self.logger.info(f"Multi遺伝子アライメント済みファイル統合完了: {combined_path}")
+        self.logger.info(f"統合されたファイル数: {len(oneline_files)}")
+        
+        return combined_path
+    
+    def _convert_to_oneline_format(self, input_path, output_path):
+        """FASTAファイルをoneliner形式に変換（Perl相当の処理）"""
+        with open(input_path, 'r') as f_in:
+            with open(output_path, 'w') as f_out:
+                sequence_buffer = ""
+                header_line = ""
+                
+                for line in f_in:
+                    line = line.rstrip('\r\n')  # 改行とCRを除去
+                    
+                    if line.startswith('>'):
+                        # 前のシーケンスを出力
+                        if header_line and sequence_buffer:
+                            f_out.write(f"{header_line}\n{sequence_buffer}\n")
+                        
+                        header_line = line
+                        sequence_buffer = ""
+                    else:
+                        # 配列行を連結
+                        sequence_buffer += line
+                
+                # 最後のシーケンスを出力
+                if header_line and sequence_buffer:
+                    f_out.write(f"{header_line}\n{sequence_buffer}\n")
+    
+    def _merge_file_with_header_replacement(self, file_path, header_name, output_file):
+        """ファイルをヘッダー置換して出力ファイルにマージ"""
+        with open(file_path, 'r') as f_in:
+            for line in f_in:
+                # 行末のCR(\r)を削除（Windowsの改行対策）
+                line = line.rstrip('\r\n')
+                
+                if line.startswith('>'):
+                    # ヘッダー行を差し替え
+                    output_file.write(f">{header_name}\n")
+                else:
+                    # 配列行はそのまま出力
+                    if line.strip():  # 空行でない場合のみ
+                        output_file.write(f"{line}\n")
+    
     def prepare_gene_sequences(self):
         """遺伝子配列ファイルの準備"""
-        # Multi遺伝子とSingle遺伝子のファイルパス
-        multi_genes_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
-        single_genes_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
-        
-        # ファイルの存在確認
         prepared_files = {}
         
-        if os.path.exists(multi_genes_path):
-            # Multi遺伝子を1行形式に変換
-            self._format_fasta_oneline(multi_genes_path)
-            prepared_files['multi_genes'] = multi_genes_path
-            self.logger.info(f"Multi遺伝子ファイルを準備: {multi_genes_path}")
+        # Multi遺伝子の処理（アライメント済みファイルを統合）
+        multi_genes_aligned_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned')
+        if os.path.exists(multi_genes_aligned_dir):
+            multi_genes_oneline_path = self._prepare_multi_genes_aligned(multi_genes_aligned_dir)
+            if multi_genes_oneline_path:
+                prepared_files['multi_genes'] = multi_genes_oneline_path
+                self.logger.info(f"Multi遺伝子アライメント済みファイルを準備: {multi_genes_oneline_path}")
+        else:
+            # フォールバック: 従来のmulti_genes.faを使用
+            multi_genes_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
+            if os.path.exists(multi_genes_path):
+                self._format_fasta_oneline(multi_genes_path)
+                prepared_files['multi_genes'] = multi_genes_path
+                self.logger.info(f"Multi遺伝子ファイル（非アライメント）を準備: {multi_genes_path}")
         
+        # Single遺伝子の処理
+        single_genes_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
         if os.path.exists(single_genes_path):
             # Single遺伝子を1行形式に変換
             self._format_fasta_oneline(single_genes_path)

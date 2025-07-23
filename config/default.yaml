@@ -50,6 +50,10 @@ report:
   generate_summary: true
   web_port: 5000
 
+# データベース設定
+database:
+  force_rebuild: false  # 既存データベースを強制的に再作成する場合はtrueに設定
+
 # Docker設定
 docker:
   max_memory: "40g"

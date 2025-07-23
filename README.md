@@ -33,9 +33,9 @@ conda install conda-forge::python=3.12 -y;
 python -m pip install -r requirements.txt;
 
 # Build Docker images if needed
-docker build -t kazukinakamae/add-go-columns:v1.0 src/docker/add_go_columns/
-docker build -t kazukinakamae/compute_go_kfi:v1.0 src/docker/compute_go_kfi/
-docker build -t kazukinakamae/count_go_parent_terms:v1.0 src/docker/count_go_parent_terms/
+sudo docker build -t kazukinakamae/add-go-columns:v1.0 src/docker/add_go_columns/
+sudo docker build -t kazukinakamae/compute_go_kfi:v1.0 src/docker/compute_go_kfi/
+sudo docker build -t kazukinakamae/count_go_parent_terms:v1.0 src/docker/count_go_parent_terms/
 ```
 
 ## Usage

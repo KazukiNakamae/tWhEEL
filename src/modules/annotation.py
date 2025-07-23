@@ -49,10 +49,20 @@ class Annotation:
     
     def run_fasta_search(self, query_path, db_path):
         """FASTA検索の実行"""
-        self.logger.info("UniProtデータベースに対するFASTA検索を開始...")
-        
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'ggsearch_results.txt')
+        
+        # 既存ファイルのチェック
+        if os.path.exists(output_path):
+            # ファイルサイズをチェックして空でないことを確認
+            if os.path.getsize(output_path) > 0:
+                self.logger.info(f"既存のFASTA検索結果が見つかりました: {output_path}")
+                self.logger.info("FASTA検索をスキップします")
+                return output_path
+            else:
+                self.logger.warning(f"既存のFASTA検索結果ファイルが空です。再実行します: {output_path}")
+        
+        self.logger.info("UniProtデータベースに対するFASTA検索を開始...")
         
         # ggsearch36実行
         cmd = [
@@ -100,32 +110,64 @@ class Annotation:
         with open(input_path, 'r') as f:
             content = f.read()
         
-        # 各クエリのセクションを分割
-        query_sections = re.split(r'^Query: (.+)$', content, flags=re.MULTILINE)
+        self.logger.debug(f"ggsearch output first 500 chars: {content[:500]}")
         
-        for i in range(1, len(query_sections), 2):
-            query_id = query_sections[i].strip()
-            query_content = query_sections[i+1] if i+1 < len(query_sections) else ""
+        # ggsearch36の実際のフォーマットに基づくパース
+        lines = content.split('\n')
+        current_query = None
+        processing_hits = False
+        
+        for line in lines:
+            line = line.strip()
             
-            # ヒットを抽出
-            hits = self._extract_hits(query_content)
+            # クエリ開始行を検索: "1>>>query_id ... - xxx aa"
+            query_match = re.match(r'^\d+>>>(.+?)\s+.+?\s+-\s+\d+\s+aa', line)
+            if query_match:
+                current_query = query_match.group(1).strip()
+                processing_hits = False
+                self.logger.debug(f"Found query: {current_query}")
+                continue
             
-            if hits:
-                # 最良のヒットを選択
-                best_hit = hits[0]
-                
-                # アノテーション情報を構築
-                annotation = {
-                    'query_id': query_id,
-                    'subject_id': best_hit.get('subject_id', ''),
-                    'identity': best_hit.get('identity', ''),
-                    'length': best_hit.get('length', ''),
-                    'evalue': best_hit.get('evalue', ''),
-                    'bit_score': best_hit.get('bit_score', ''),
-                    'description': best_hit.get('description', '')
-                }
-                
-                annotations.append(annotation)
+            # ヒットセクション開始を検出: "The best scores are:"
+            if "The best scores are:" in line:
+                processing_hits = True
+                continue
+            
+            # ヒット行をパース: "sp|ID|NAME description (length) score bits E-value"
+            if processing_hits and current_query and line.startswith('sp|'):
+                # より柔軟な正規表現でヒット行をパース
+                hit_match = re.match(r'sp\|([^|]+)\|([^\s]+)\s+(.+?)\s+\(\s*(\d+)\)\s+(\d+)\s+([\d.]+)\s+([\d.e-]+)', line)
+                if hit_match:
+                    subject_acc = hit_match.group(1)
+                    subject_name = hit_match.group(2)
+                    description = hit_match.group(3).strip()
+                    length = hit_match.group(4)
+                    score = hit_match.group(5)
+                    bits = hit_match.group(6)
+                    evalue = hit_match.group(7)
+                    
+                    annotation = {
+                        'query_id': current_query,
+                        'subject_id': f"sp|{subject_acc}|{subject_name}",
+                        'identity': '',  # ggsearch36では直接的な同一性情報がない
+                        'length': length,
+                        'evalue': evalue,
+                        'bit_score': bits,
+                        'description': description
+                    }
+                    
+                    annotations.append(annotation)
+                    self.logger.debug(f"Parsed hit: {subject_acc} for query {current_query}")
+                    # 最初のヒットのみを取得して次のクエリへ
+                    current_query = None
+                    processing_hits = False
+                    continue
+                else:
+                    self.logger.debug(f"Failed to parse hit line: {line}")
+            
+            # 次のクエリセクションまたはファイル終了でヒット処理を停止
+            if processing_hits and (line.startswith('>>>') or not line):
+                processing_hits = False
         
         # 結果をファイルに保存
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -133,14 +175,80 @@ class Annotation:
             for ann in annotations:
                 f.write(f"{ann['query_id']}\t{ann['subject_id']}\t{ann['identity']}\t"
                        f"{ann['length']}\t{ann['evalue']}\t{ann['bit_score']}\t{ann['description']}\n")
+        
+        self.logger.info(f"Parsed {len(annotations)} annotations from ggsearch output")
+    
+    def _parse_ggsearch_line_based(self, content, output_path):
+        """行ベースでggsearch結果をパース（フォールバック）"""
+        annotations = []
+        lines = content.split('\n')
+        
+        current_query = None
+        in_hits_section = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            # クエリIDを検索
+            if line.startswith('>>>') and ',' in line:
+                current_query = line[3:].split(',')[0].strip()
+                in_hits_section = False
+                continue
+            
+            # ヒット開始を検出
+            if current_query and '>>' in line and 'aa)' in line:
+                in_hits_section = True
+                
+                # ヒット情報を抽出
+                hit_match = re.search(r'>>(.+?)\s+\((\d+)\s+aa\)', line)
+                if hit_match:
+                    subject_info = hit_match.group(1).strip()
+                    subject_length = hit_match.group(2)
+                    
+                    # 簡単なアノテーション情報を構築
+                    annotation = {
+                        'query_id': current_query,
+                        'subject_id': subject_info.split()[0] if subject_info else '',
+                        'identity': '',
+                        'length': subject_length,
+                        'evalue': '',
+                        'bit_score': '',
+                        'description': subject_info
+                    }
+                    
+                    annotations.append(annotation)
+                    # 1つ目のヒットのみを取得
+                    current_query = None
+                    in_hits_section = False
+        
+        # 結果をファイルに保存
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("query_id\tsubject_id\tidentity\tlength\tevalue\tbit_score\tdescription\n")
+            for ann in annotations:
+                f.write(f"{ann['query_id']}\t{ann['subject_id']}\t{ann['identity']}\t"
+                       f"{ann['length']}\t{ann['evalue']}\t{ann['bit_score']}\t{ann['description']}\n")
+        
+        self.logger.info(f"Line-based parsing found {len(annotations)} annotations")
     
     def _extract_hits(self, query_content):
-        """クエリ内容からヒット情報を抽出"""
+        """クエリ内容からヒット情報を抽出（改善版）"""
         hits = []
         
-        # ヒットセクションを検索
-        hit_pattern = r'>>(.+?)\s+\((\d+)\s+aa\)'
-        matches = re.finditer(hit_pattern, query_content)
+        # 複数のヒットパターンを試行
+        hit_patterns = [
+            r'>>(.+?)\s+\((\d+)\s+aa\)',  # 元のパターン
+            r'>>(.+?)\s+\((\d+)\s+nt\)',  # 核酸配列の場合
+            r'>(.+?)\s+Length:\s*(\d+)'    # 別のフォーマット
+        ]
+        
+        for pattern in hit_patterns:
+            matches = list(re.finditer(pattern, query_content))
+            if matches:
+                self.logger.debug(f"Found {len(matches)} hits with pattern: {pattern}")
+                break
+        
+        if not matches:
+            return hits
         
         for match in matches:
             subject_info = match.group(1).strip()
@@ -153,17 +261,54 @@ class Annotation:
             
             hit_section = query_content[hit_start:hit_end]
             
-            # E値、スコア、同一性を抽出
-            score_match = re.search(r'E\(\d+\):\s+([\d.e-]+).*?(\d+\.?\d*)\s+bits', hit_section)
-            identity_match = re.search(r'identity:\s+(\d+\.?\d*)%', hit_section)
+            # E値、スコア、同一性を抽出（複数のパターンを試行）
+            evalue = ''
+            bit_score = ''
+            identity = ''
+            
+            # E値の抽出
+            evalue_patterns = [
+                r'E\(\d+\):\s+([\d.e-]+)',
+                r'E-value:\s*([\d.e-]+)',
+                r'Expect\s*=\s*([\d.e-]+)'
+            ]
+            for e_pattern in evalue_patterns:
+                e_match = re.search(e_pattern, hit_section)
+                if e_match:
+                    evalue = e_match.group(1)
+                    break
+            
+            # スコアの抽出
+            score_patterns = [
+                r'(\d+\.?\d*)\s+bits',
+                r'Score\s*=\s*(\d+\.?\d*)',
+                r'bits:\s*(\d+\.?\d*)'
+            ]
+            for s_pattern in score_patterns:
+                s_match = re.search(s_pattern, hit_section)
+                if s_match:
+                    bit_score = s_match.group(1)
+                    break
+            
+            # 同一性の抽出
+            identity_patterns = [
+                r'identity:\s+(\d+\.?\d*)%',
+                r'Identity\s*=\s*(\d+\.?\d*)%',
+                r'(\d+\.?\d*)%\s+identity'
+            ]
+            for i_pattern in identity_patterns:
+                i_match = re.search(i_pattern, hit_section)
+                if i_match:
+                    identity = i_match.group(1)
+                    break
             
             hit = {
                 'subject_id': subject_info.split()[0] if subject_info else '',
                 'description': subject_info,
                 'length': subject_length,
-                'evalue': score_match.group(1) if score_match else '',
-                'bit_score': score_match.group(2) if score_match else '',
-                'identity': identity_match.group(1) if identity_match else ''
+                'evalue': evalue,
+                'bit_score': bit_score,
+                'identity': identity
             }
             
             hits.append(hit)
@@ -174,8 +319,8 @@ class Annotation:
         """遺伝子の分類（Multi/Single）"""
         self.logger.info("遺伝子の分類を開始...")
         
-        # アノテーション結果を読み込み
-        genes = {}
+        # subject_idをキーとしてアノテーション結果を読み込み
+        subjects = {}
         
         with open(annotation_path, 'r', encoding='utf-8') as f:
             header = f.readline().strip()
@@ -186,46 +331,53 @@ class Annotation:
                     subject_id = fields[1]
                     description = fields[6]
                     
-                    # 遺伝子名を抽出
-                    gene_name = self._extract_gene_name(description)
+                    if subject_id not in subjects:
+                        subjects[subject_id] = []
                     
-                    if gene_name not in genes:
-                        genes[gene_name] = []
-                    
-                    genes[gene_name].append({
+                    subjects[subject_id].append({
                         'query_id': query_id,
                         'subject_id': subject_id,
-                        'description': description
+                        'description': description,
+                        'line_data': line.strip()
                     })
         
-        # Multi/Single分類
+        # subject_idベースでMulti/Single判定と連番でunique_ID割り当て
+        multi_counter = 1
+        single_counter = 1
+        subject_to_unique_id = {}
+        
+        for subject_id, entries in subjects.items():
+            if len(entries) > 1:
+                # Multi: 複数のquery_idが同じsubject_idにマッチ
+                unique_id = f"Multi_{multi_counter:010d}"
+                subject_to_unique_id[subject_id] = unique_id
+                multi_counter += 1
+            else:
+                # Single: 1つのquery_idが1つのsubject_idにマッチ
+                unique_id = f"Single_{single_counter:010d}"
+                subject_to_unique_id[subject_id] = unique_id
+                single_counter += 1
+        
+        # 分類結果を出力
         classified_path = os.path.join(self.intermediate_dir, 'annotation_classified.txt')
         
         with open(classified_path, 'w', encoding='utf-8') as f:
             f.write("query_id\tsubject_id\tidentity\tlength\tevalue\tbit_score\tdescription\tgene_name\tclassification\tunique_id\n")
             
-            # 元のファイルを再読み込みして分類情報を追加
-            with open(annotation_path, 'r', encoding='utf-8') as f_orig:
-                header = f_orig.readline().strip()
-                for line in f_orig:
-                    fields = line.strip().split('\t')
-                    if len(fields) >= 7:
-                        query_id = fields[0]
-                        description = fields[6]
-                        gene_name = self._extract_gene_name(description)
-                        
-                        # 分類を決定
-                        if len(genes[gene_name]) > 1:
-                            classification = "Multi"
-                            unique_id = f"Multi_{gene_name}_{hash(query_id) % 100000:05d}"
-                        else:
-                            classification = "Single"
-                            unique_id = f"Single_{gene_name}_{hash(query_id) % 100000:05d}"
-                        
-                        # 分類情報を追加して出力
-                        f.write(f"{line.strip()}\t{gene_name}\t{classification}\t{unique_id}\n")
+            # subject_idごとに結果を出力
+            for subject_id, entries in subjects.items():
+                unique_id = subject_to_unique_id[subject_id]
+                classification = "Multi" if unique_id.startswith("Multi") else "Single"
+                
+                for entry in entries:
+                    # 遺伝子名を抽出
+                    gene_name = self._extract_gene_name(entry['description'])
+                    
+                    # 分類情報を追加して出力
+                    f.write(f"{entry['line_data']}\t{gene_name}\t{classification}\t{unique_id}\n")
         
         self.logger.info(f"遺伝子分類結果を保存: {classified_path}")
+        self.logger.info(f"Multi遺伝子数: {multi_counter - 1}, Single遺伝子数: {single_counter - 1}")
         return classified_path
     
     def _extract_gene_name(self, description):
@@ -272,10 +424,16 @@ class Annotation:
         # 元のトランスクリプトームファイルから配列を抽出
         transcriptome_path = os.path.join(self.intermediate_dir, 'transcriptome.fa')
         
-        # Multi遺伝子の配列抽出
+        # Multi遺伝子の配列抽出と個別ファイル作成
         if multi_genes:
             multi_seq_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
             self._extract_sequences_by_ids(transcriptome_path, multi_seq_path, multi_genes)
+            
+            # Multi遺伝子を個別ファイルに分割
+            self._create_individual_multi_gene_files(transcriptome_path, multi_genes)
+            
+            # アライメント処理を実行
+            self._run_alignment_process()
         
         # Single遺伝子の配列抽出
         if single_genes:
@@ -318,13 +476,123 @@ class Annotation:
                 if isinstance(query_ids, list):
                     # Multi遺伝子の場合
                     for query_id in query_ids:
-                        if query_id in sequences:
-                            f.write(f">{unique_id}_{query_id}\n{sequences[query_id]}\n")
+                        # query_idから .p1 などを除去
+                        base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
+                        if base_id in sequences:
+                            f.write(f">{unique_id}_{query_id}\n{sequences[base_id]}\n")
+                        else:
+                            self.logger.warning(f"配列が見つかりません (Multi): {query_id} -> {base_id}")
                 else:
                     # Single遺伝子の場合
                     query_id = query_ids
-                    if query_id in sequences:
-                        f.write(f">{unique_id}\n{sequences[query_id]}\n")
+                    # query_idから .p1 などを除去
+                    base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
+                    if base_id in sequences:
+                        f.write(f">{unique_id}\n{sequences[base_id]}\n")
+                    else:
+                        self.logger.warning(f"配列が見つかりません (Single): {query_id} -> {base_id}")
+    
+    def _create_individual_multi_gene_files(self, transcriptome_path, multi_genes):
+        """Multi遺伝子を個別ファイルに分割"""
+        self.logger.info("Multi遺伝子を個別ファイルに分割中...")
+        
+        # multi_genesディレクトリを作成
+        multi_genes_dir = os.path.join(self.intermediate_dir, 'multi_genes')
+        Path(multi_genes_dir).mkdir(parents=True, exist_ok=True)
+        
+        # 全配列を読み込み
+        sequences = {}
+        with open(transcriptome_path, 'r') as f:
+            current_id = None
+            current_seq = ""
+            
+            for line in f:
+                line = line.strip()
+                if line.startswith('>'):
+                    if current_id and current_seq:
+                        sequences[current_id] = current_seq
+                    current_id = line[1:].split()[0]  # 最初の部分のみを取得
+                    current_seq = ""
+                else:
+                    current_seq += line
+            
+            # 最後の配列を処理
+            if current_id and current_seq:
+                sequences[current_id] = current_seq
+        
+        # Multi遺伝子ごとに個別ファイルを作成
+        for unique_id, query_ids in multi_genes.items():
+            output_file = os.path.join(multi_genes_dir, f"{unique_id}.fa")
+            
+            with open(output_file, 'w') as f:
+                for query_id in query_ids:
+                    # query_idから .p1 などを除去
+                    base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
+                    if base_id in sequences:
+                        f.write(f">{unique_id}_{query_id}\n{sequences[base_id]}\n")
+                    else:
+                        self.logger.warning(f"配列が見つかりません (Multi individual): {query_id} -> {base_id}")
+            
+            self.logger.debug(f"Multi遺伝子個別ファイル作成: {output_file}")
+        
+        self.logger.info(f"Multi遺伝子個別ファイル作成完了: {len(multi_genes)} ファイル")
+    
+    def _run_alignment_process(self):
+        """アライメント処理を実行"""
+        self.logger.info("Multi遺伝子アライメント処理を開始...")
+        
+        multi_genes_dir = os.path.join(self.intermediate_dir, 'multi_genes')
+        multi_genes_aligned_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned')
+        
+        # 出力ディレクトリを作成
+        Path(multi_genes_aligned_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Dockerイメージをビルド
+        docker_build_dir = "src/docker/run_alignment_and_mask"
+        self.logger.info("run_alignment_and_maskのDockerイメージをビルド中...")
+        
+        build_cmd = [
+            "sudo", "docker", "build",
+            "-t", "run_alignment_and_mask/v1.0",
+            docker_build_dir
+        ]
+        
+        build_result = subprocess.run(build_cmd, capture_output=True, text=True)
+        if build_result.returncode != 0:
+            self.logger.error(f"Dockerビルドエラー: {build_result.stderr}")
+            raise RuntimeError("Dockerイメージのビルドに失敗しました")
+        
+        self.logger.info("Dockerイメージビルド完了")
+        
+        # アライメント処理を実行
+        alignment_cmd = [
+            "docker", "run",
+            "-m", "4G",
+            "-v", f"{os.getcwd()}:/data",
+            "-w", "/data",
+            "--rm",
+            "run_alignment_and_mask/v1.0",
+            "python", "/app/run_alignment_and_mask.py",
+            "-i", multi_genes_dir,
+            "-o", multi_genes_aligned_dir
+        ]
+        
+        self.logger.debug(f"アライメント実行コマンド: {' '.join(alignment_cmd)}")
+        
+        alignment_result = subprocess.run(alignment_cmd, capture_output=True, text=True)
+        if alignment_result.returncode != 0:
+            self.logger.error(f"アライメント処理エラー: {alignment_result.stderr}")
+            raise RuntimeError("アライメント処理に失敗しました")
+        
+        # 実行結果をログ出力
+        if alignment_result.stdout:
+            self.logger.info(f"アライメント処理出力:\n{alignment_result.stdout}")
+        
+        self.logger.info("Multi遺伝子アライメント処理完了")
+        
+        # 結果ファイル数を確認
+        aligned_files = list(Path(multi_genes_aligned_dir).glob("*_aligned_consensus.fa"))
+        self.logger.info(f"生成されたアライメント済みファイル数: {len(aligned_files)}")
     
     def run(self):
         """アノテーション処理の全体実行"""

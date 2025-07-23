@@ -32,8 +32,8 @@ def calculate_go_kfi(df):
         'gene_list': []
     })
     
-    # GO列を特定
-    go_columns = [col for col in df.columns if col.startswith('GO_')]
+    # GO列を選んで処理 *現状カテゴリごとに分離せず、全てのGOのリストに対してGO-KFIを計算するようにしている。
+    go_columns = ["GO_ALL"]
     
     for index, row in df.iterrows():
         unique_id = row.get('unique_id', '')
@@ -134,6 +134,52 @@ def generate_statistics(kfi_df):
     return stats_report
 
 
+def validate_input_data(df):
+    """入力データの検証"""
+    print("Validating input data...")
+    
+    # GO列の確認
+    go_columns = [col for col in df.columns if col.startswith('GO_')]
+    print(f"Found GO columns: {go_columns}")
+    
+    if not go_columns:
+        print("ERROR: No GO columns found in input data!", file=sys.stderr)
+        print("Expected columns starting with 'GO_'", file=sys.stderr)
+        return False
+    
+    # GO列にデータが存在するかチェック
+    total_go_entries = 0
+    for go_col in go_columns:
+        non_empty = df[go_col].notna() & (df[go_col] != '') & (df[go_col] != 'nan')
+        count = non_empty.sum()
+        total_go_entries += count
+        print(f"  {go_col}: {count} non-empty entries ({count/len(df)*100:.1f}%)")
+    
+    if total_go_entries == 0:
+        print("ERROR: No GO annotation data found!", file=sys.stderr)
+        print("All GO columns are empty. This indicates GO annotation retrieval failed.", file=sys.stderr)
+        print("Possible causes:", file=sys.stderr)
+        print("1. UniProt API connection failure", file=sys.stderr)
+        print("2. Invalid UniProt IDs in subject_id column", file=sys.stderr)
+        print("3. Network connectivity issues", file=sys.stderr)
+        return False
+    
+    # guide_targets列の確認
+    if 'guide_targets' not in df.columns:
+        print("ERROR: guide_targets column not found!", file=sys.stderr)
+        return False
+    
+    # guide_targets列のデータ確認
+    guide_non_empty = df['guide_targets'].notna() & (df['guide_targets'] != '') & (df['guide_targets'] != 'nan')
+    guide_count = guide_non_empty.sum()
+    print(f"guide_targets: {guide_count} non-empty entries ({guide_count/len(df)*100:.1f}%)")
+    
+    if guide_count == 0:
+        print("WARNING: No guide targets found!", file=sys.stderr)
+    
+    print(f"Data validation completed. Total GO entries: {total_go_entries}")
+    return True
+
 def main():
     parser = argparse.ArgumentParser(description='GO Knock-out Feasibility Index (GO-KFI) 計算')
     parser.add_argument('-i', '--input', required=True, help='入力TSVファイル')
@@ -147,8 +193,38 @@ def main():
     # 入力ファイルを読み込み
     try:
         df = pd.read_csv(args.input, sep='\t', low_memory=False)
+        print(f"Successfully loaded {len(df)} rows with {len(df.columns)} columns")
+        print(f"Columns: {list(df.columns)}")
     except Exception as e:
         print(f"Error reading input file: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # 入力データの検証
+    if not validate_input_data(df):
+        print("Data validation failed. Cannot proceed with GO-KFI calculation.", file=sys.stderr)
+        
+        # 空の結果ファイルを作成
+        empty_df = pd.DataFrame(columns=['GO_ID', 'total_genes', 'genes_with_guides', 'total_guides', 'kfi_score', 'targetable_type'])
+        empty_df.to_csv(args.output, index=False)
+        
+        # エラー情報を含む統計ファイルを作成
+        error_stats = """[ERROR] GO-KFI calculation failed due to missing GO annotation data.
+
+Root cause: GO annotation retrieval from UniProt failed.
+
+Recommendations:
+1. Check network connectivity to UniProt REST API
+2. Verify UniProt IDs in subject_id column are valid
+3. Consider using local GO annotation database
+4. Re-run the go_analysis step with proper GO data
+
+Statistics: 0 GO terms processed (data validation failed)
+"""
+        
+        with open(args.stats, 'w') as f:
+            f.write(error_stats)
+        
+        print(error_stats)
         sys.exit(1)
     
     print(f"Processing {len(df)} rows for GO-KFI calculation...")
@@ -156,10 +232,15 @@ def main():
     # GO-KFIを計算
     kfi_df = calculate_go_kfi(df)
     
+    if len(kfi_df) == 0:
+        print("WARNING: No GO terms found for KFI calculation!", file=sys.stderr)
+        print("This may indicate empty GO annotation data.", file=sys.stderr)
+    
     # 結果を保存
     try:
         kfi_df.to_csv(args.output, index=False)
         print(f"GO-KFI table saved to: {args.output}")
+        print(f"Generated {len(kfi_df)} GO term entries")
     except Exception as e:
         print(f"Error writing output file: {e}", file=sys.stderr)
         sys.exit(1)

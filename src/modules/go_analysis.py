@@ -25,10 +25,20 @@ class GOAnalysis:
         self.logger = logging.getLogger(__name__)
         self.intermediate_dir = self.config['output']['intermediate']
         self.docker_dir = os.path.join('src', 'docker')
+    
+    def _check_docker_image_exists(self, image_name):
+        """Dockerイメージが存在するかチェック"""
+        try:
+            cmd = ["docker", "images", "-q", image_name]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return bool(result.stdout.strip())
+        except Exception as e:
+            self.logger.warning(f"Dockerイメージ存在チェック中にエラー: {e}")
+            return False
         
     def build_docker_images(self):
-        """カスタムDockerイメージのビルド"""
-        self.logger.info("カスタムDockerイメージをビルド中...")
+        """カスタムDockerイメージのビルド（既存イメージチェック機能付き）"""
+        self.logger.info("カスタムDockerイメージの準備を開始...")
         
         # 必要なDockerイメージのリスト
         docker_images = [
@@ -37,11 +47,20 @@ class GOAnalysis:
             ('count_go_parent_terms', self.config['go_analysis']['count_parent_image'])
         ]
         
+        build_needed = False
+        
         for folder_name, image_name in docker_images:
+            # 既存イメージのチェック
+            if self._check_docker_image_exists(image_name):
+                self.logger.info(f"Dockerイメージが既に存在します（ビルドをスキップ）: {image_name}")
+                continue
+            
+            # イメージが存在しない場合、ビルドを実行
             docker_path = os.path.join(self.docker_dir, folder_name)
             
             if os.path.exists(docker_path):
-                self.logger.info(f"Dockerイメージをビルド: {image_name}")
+                self.logger.info(f"Dockerイメージをビルド中: {image_name}")
+                build_needed = True
                 
                 cmd = [
                     "docker", "build", 
@@ -53,13 +72,26 @@ class GOAnalysis:
                 
                 if result.returncode != 0:
                     self.logger.error(f"Dockerビルドエラー ({image_name}): {result.stderr}")
+                    
+                    # 権限エラーの場合は追加情報を提供
+                    if "permission denied" in result.stderr.lower():
+                        self.logger.error("Docker権限エラーが発生しました。以下を確認してください:")
+                        self.logger.error("1. Dockerデーモンが起動していることを確認")
+                        self.logger.error("2. ユーザーがdockerグループに属していることを確認")
+                        self.logger.error("3. 'sudo docker build'の使用を検討")
+                    
                     raise RuntimeError(f"Dockerイメージのビルドに失敗しました: {image_name}")
                 
                 self.logger.info(f"Dockerイメージビルド完了: {image_name}")
             else:
                 self.logger.warning(f"Dockerディレクトリが見つかりません: {docker_path}")
+                self.logger.warning(f"イメージ '{image_name}' が存在しないため、処理を続行できません")
+                raise FileNotFoundError(f"Dockerディレクトリが見つかりません: {docker_path}")
         
-        self.logger.info("カスタムDockerイメージのビルドが完了しました")
+        if build_needed:
+            self.logger.info("カスタムDockerイメージのビルドが完了しました")
+        else:
+            self.logger.info("必要なDockerイメージは全て準備済みです")
     
     def add_go_annotations(self, input_path):
         """GOアノテーションの追加"""
@@ -165,6 +197,41 @@ class GOAnalysis:
         parent_csv_path = os.path.join(self.intermediate_dir, 'go_parent_counts.csv')
         parent_png_path = os.path.join(self.intermediate_dir, 'go_parent_counts.png')
         
+        # Fully targetable GOsファイルの内容をチェック
+        go_count = 0
+        try:
+            with open(fully_targetable_path, 'r') as f:
+                # ヘッダー行をスキップ
+                next(f)
+                go_count = sum(1 for _ in f)
+        except Exception as e:
+            self.logger.warning(f"Fully targetable GOsファイルの読み込みエラー: {e}")
+        
+        if go_count == 0:
+            self.logger.warning("Fully targetable GOsが0個のため、GO親term分析をスキップします")
+            self.logger.info("このデータセットでは、完全にターゲット可能なGO termが見つかりませんでした")
+            
+            # 空の結果ファイルを作成
+            with open(parent_csv_path, 'w') as f:
+                f.write("go_term,count,parent_term\n")
+            
+            # 空のPNGファイルの代替として説明ファイルを作成
+            no_data_message = os.path.join(self.intermediate_dir, 'go_parent_counts_no_data.txt')
+            with open(no_data_message, 'w') as f:
+                f.write("GO親term可視化結果\n")
+                f.write("===================\n\n")
+                f.write("Fully targetable GO terms: 0個\n")
+                f.write("可視化対象データがないため、グラフは生成されませんでした。\n\n")
+                f.write("考えられる原因:\n")
+                f.write("- CRISPRガイド標的が設計されていないGO terms\n")
+                f.write("- GO-KFI計算での閾値設定\n")
+                f.write("- 入力データのフィルタリング条件\n")
+            
+            self.logger.info(f"GO親term分析スキップ完了: 結果説明ファイル {no_data_message}")
+            return parent_csv_path, no_data_message
+        
+        self.logger.info(f"処理対象のFully targetable GOs: {go_count}個")
+        
         # DockerでGO親term分析
         cmd = [
             "docker", "run", "-it", "--rm",
@@ -247,37 +314,73 @@ class GOAnalysis:
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'go_reverse_lookup.tsv')
         
+        # CSVフィールドサイズ制限を増加
+        max_field_size = csv.field_size_limit()
+        try:
+            csv.field_size_limit(1000000)  # 1MBに増加
+        except OverflowError:
+            csv.field_size_limit(max_field_size)  # システムの最大値を使用
+            self.logger.warning(f"CSVフィールドサイズ制限を最大値 {max_field_size} に設定")
+        
         # GOアノテーションファイルを読み込み
         go_to_genes = {}
         
-        with open(go_annotated_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='\t')
-            header = next(reader)
-            
-            # GO termの列を特定
-            go_columns = [i for i, col in enumerate(header) if 'GO' in col.upper()]
-            
-            for row in reader:
-                if len(row) > max(go_columns) if go_columns else False:
-                    # 遺伝子情報を取得
-                    gene_info = {
-                        'query_id': row[0] if len(row) > 0 else '',
-                        'subject_id': row[1] if len(row) > 1 else '',
-                        'description': row[6] if len(row) > 6 else '',
-                        'unique_id': row[9] if len(row) > 9 else '',
-                        'guide_targets': row[-1] if len(row) > 10 else ''
-                    }
+        try:
+            with open(go_annotated_path, 'r', encoding='utf-8') as f:
+                # 手動でTSVを解析（csvモジュールを使わない方法）
+                header_line = f.readline().strip()
+                header = header_line.split('\t')
+                
+                # GO termの列を特定
+                go_columns = [i for i, col in enumerate(header) if 'GO' in col.upper()]
+                self.logger.debug(f"GOアノテーション列: {[header[i] for i in go_columns]}")
+                
+                line_count = 0
+                for line in f:
+                    line_count += 1
+                    if line_count % 10000 == 0:
+                        self.logger.debug(f"処理済み行数: {line_count}")
                     
-                    # 各GO termに対して遺伝子情報を登録
-                    for col_idx in go_columns:
-                        if col_idx < len(row) and row[col_idx]:
-                            go_terms = row[col_idx].split(';')
-                            for go_term in go_terms:
-                                go_term = go_term.strip()
-                                if go_term:
-                                    if go_term not in go_to_genes:
-                                        go_to_genes[go_term] = []
-                                    go_to_genes[go_term].append(gene_info)
+                    try:
+                        row = line.strip().split('\t')
+                        
+                        if len(row) > max(go_columns) if go_columns else False:
+                            # 遺伝子情報を取得
+                            gene_info = {
+                                'query_id': row[0] if len(row) > 0 else '',
+                                'subject_id': row[1] if len(row) > 1 else '',
+                                'description': row[6] if len(row) > 6 else '',
+                                'unique_id': row[9] if len(row) > 9 else '',
+                                'guide_targets': row[-1] if len(row) > 10 else ''
+                            }
+                            
+                            # guide_targetsが非常に長い場合は切り詰め
+                            if len(gene_info['guide_targets']) > 50000:
+                                gene_info['guide_targets'] = gene_info['guide_targets'][:50000] + "...[truncated]"
+                            
+                            # 各GO termに対して遺伝子情報を登録
+                            for col_idx in go_columns:
+                                if col_idx < len(row) and row[col_idx]:
+                                    go_terms = row[col_idx].split(';')
+                                    for go_term in go_terms:
+                                        go_term = go_term.strip()
+                                        if go_term:
+                                            if go_term not in go_to_genes:
+                                                go_to_genes[go_term] = []
+                                            go_to_genes[go_term].append(gene_info)
+                    
+                    except Exception as e:
+                        self.logger.warning(f"行 {line_count} の処理でエラー: {e}")
+                        continue
+                
+                self.logger.info(f"総処理行数: {line_count}")
+        
+        except Exception as e:
+            self.logger.error(f"GOアノテーションファイル読み込みエラー: {e}")
+            raise
+        finally:
+            # CSVフィールドサイズ制限を元に戻す
+            csv.field_size_limit(max_field_size)
         
         # 逆引きデータをファイルに保存
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -288,12 +391,17 @@ class GOAnalysis:
                 gene_list = []
                 
                 for gene in genes:
-                    gene_str = f"{gene['unique_id']}|{gene['description']}|{gene['guide_targets']}"
+                    # 長すぎる場合は切り詰める
+                    description = gene['description'][:500] + "..." if len(gene['description']) > 500 else gene['description']
+                    guide_targets = gene['guide_targets'][:1000] + "..." if len(gene['guide_targets']) > 1000 else gene['guide_targets']
+                    
+                    gene_str = f"{gene['unique_id']}|{description}|{guide_targets}"
                     gene_list.append(gene_str)
                 
                 f.write(f"{go_term}\t{gene_count}\t{';'.join(gene_list)}\n")
         
         self.logger.info(f"GO逆引き検索データ作成完了: {output_path}")
+        self.logger.info(f"総GO term数: {len(go_to_genes)}")
         return output_path
     
     def run(self):

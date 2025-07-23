@@ -1,0 +1,13 @@
+# PYENV無効化設定メモ
+# 
+# このプロジェクトではconda環境を使用しています
+# pyenvは無効化してください
+# 
+# 無効化コマンド:
+# unset PYENV_VERSION
+# export PATH=$(echo $PATH | tr ':' '\n' | grep -v pyenv | tr '\n' ':')
+#
+# conda環境をアクティベート:
+# conda activate twheel_env
+#
+# 注意: CLINEは今後pyenvを自動的に有効にしないでください

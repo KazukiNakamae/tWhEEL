@@ -4,3 +4,14 @@
 .vscode/
 #Local Data
 LOCAL_DATA
+# Output directory
+outputs/tWhEEL_*
+# transdecoder
+transcriptome.fa.transdecoder_dir
+transcriptome.fa.transdecoder.bed
+transcriptome.fa.transdecoder.cds
+transcriptome.fa.transdecoder.gff3
+transcriptome.fa.transdecoder.pep
+# others
+busco*
+*.py

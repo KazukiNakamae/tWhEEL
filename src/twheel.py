@@ -26,16 +26,18 @@ from modules.report_generator import ReportGenerator
 class tWhEELPipeline:
     """Main class for tWhEEL pipeline"""
     
-    def __init__(self, config_path):
+    def __init__(self, config_path, analysis_name=None):
         """
         Initialize the pipeline
         
         Args:
             config_path (str): Path to configuration file
+            analysis_name (str, optional): Analysis name for output directory
         """
         self.config = self._load_config(config_path)
-        self.setup_logging()
+        self.create_output_directory(analysis_name)
         self.setup_directories()
+        self.setup_logging()
         
     def _load_config(self, config_path):
         """Load configuration file"""
@@ -46,6 +48,32 @@ class tWhEELPipeline:
         except Exception as e:
             print(f"Failed to load configuration file: {e}")
             sys.exit(1)
+    
+    def create_output_directory(self, analysis_name=None):
+        """Create output directory with timestamp and analysis name"""
+        if analysis_name:
+            # Check if a complete directory name is provided
+            if analysis_name.startswith('tWhEEL_on_'):
+                # Use the complete directory name as provided
+                dir_name = analysis_name
+                print(f"Using existing directory name: {analysis_name}")
+            else:
+                # Generate new directory name with timestamp
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                dir_name = f"tWhEEL_on_{timestamp}_{analysis_name}"
+                print(f"Creating new directory with timestamp")
+        else:
+            # No analysis name provided, use timestamp only
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            dir_name = f"tWhEEL_on_{timestamp}"
+            print(f"Creating new directory with timestamp only")
+        
+        # Update config with new output paths
+        output_dir = os.path.join("outputs", dir_name)
+        self.config['output']['base_dir'] = output_dir
+        self.config['output']['intermediate'] = os.path.join(output_dir, 'intermediate')
+        
+        print(f"Output directory: {output_dir}")
     
     def setup_logging(self):
         """Setup logging configuration"""
@@ -84,7 +112,7 @@ class tWhEELPipeline:
         
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
-            self.logger.debug(f"Created directory: {directory}")
+            print(f"Created directory: {directory}")
     
     def validate_inputs(self):
         """Validate input files"""
@@ -184,8 +212,15 @@ def main():
         epilog="""
 Examples:
   python twheel.py --config config/default.yaml
-  python twheel.py --config my_config.yaml --step annotation
+  python twheel.py --config my_config.yaml --name my_analysis
+  python twheel.py --config my_config.yaml --step annotation --name test_run
+  python twheel.py --config my_config.yaml --step annotation --name tWhEEL_on_20250719_082938_E_okinawaensis_denovoanalysis
   python twheel.py --list-steps
+
+Note:
+  --name can specify either:
+    - A simple analysis name (creates new timestamped directory)
+    - A complete directory name starting with 'tWhEEL_on_' (reuses existing directory)
         """
     )
     
@@ -198,6 +233,11 @@ Examples:
     parser.add_argument(
         '--step', '-s',
         help='Execute specific step (omit to run all steps)'
+    )
+    
+    parser.add_argument(
+        '--name', '-n',
+        help='Analysis name for output directory'
     )
     
     parser.add_argument(
@@ -223,7 +263,7 @@ Examples:
     
     # Execute pipeline
     try:
-        pipeline = tWhEELPipeline(args.config)
+        pipeline = tWhEELPipeline(args.config, args.name)
         
         if args.step:
             # Execute specific step only

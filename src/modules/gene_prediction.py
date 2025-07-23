@@ -120,7 +120,9 @@ class GenePrediction:
             raise RuntimeError("TransDecoder.Predict実行に失敗しました")
         
         # 予測されたタンパク質配列ファイルをコピー
-        protein_path = f"{input_path}.transdecoder.pep"
+        # TransDecoderは入力ファイルのベースネームを使って出力ファイルを作成する
+        input_filename = os.path.basename(input_path)
+        protein_path = f"{input_filename}.transdecoder.pep"
         query_path = os.path.join(self.intermediate_dir, 'query.pep')
         
         if os.path.exists(protein_path):
@@ -159,19 +161,24 @@ class GenePrediction:
         """BUSCO評価の実行"""
         self.logger.info("BUSCO評価を開始...")
         
-        # BUSCO出力ディレクトリ
-        busco_output = os.path.join(self.intermediate_dir, 'busco_output')
+        # BUSCO出力ディレクトリ名（フルパスではなく名前のみ）
+        busco_output_name = 'busco_output'
+        busco_output_path = os.path.join(self.intermediate_dir, busco_output_name)
+        
+        # protein_pathの相対パスを取得
+        protein_filename = os.path.basename(protein_path)
         
         cmd = [
             "docker", "run",
-            "-v", f"{os.getcwd()}:/data",
-            "-w", "/data",
+            "--platform", "linux/amd64",  # Apple Silicon対応
+            "-v", f"{os.path.abspath(self.intermediate_dir)}:/busco_work",
+            "-w", "/busco_work",
             "--rm",
             self.config['busco']['docker_image'],
             "busco",
             "-m", "protein",
-            "-i", protein_path,
-            "-o", busco_output,
+            "-i", protein_filename,  # 相対パス
+            "-o", busco_output_name,  # ディレクトリ名のみ
             "-l", self.config['busco']['lineage'],
             "-c", str(self.config['busco']['cpu'])
         ]
@@ -184,7 +191,7 @@ class GenePrediction:
             raise RuntimeError("BUSCO評価に失敗しました")
         
         # BUSCO結果の読み取り
-        busco_summary = self._parse_busco_results(busco_output)
+        busco_summary = self._parse_busco_results(busco_output_path)
         
         self.logger.info("BUSCO評価結果:")
         self.logger.info(busco_summary)
