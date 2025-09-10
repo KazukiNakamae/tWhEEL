@@ -63,7 +63,7 @@ class GOAnalysis:
                 build_needed = True
                 
                 cmd = [
-                    "docker", "build", 
+                    "sudo", "docker", "build", 
                     "-t", image_name,
                     docker_path
                 ]

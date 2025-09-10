@@ -25,6 +25,7 @@ class Annotation:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.intermediate_dir = self.config['output']['intermediate']
+        self.protein_transcript_mapping = None
         
     def prepare_uniprot_db(self):
         """UniProtデータベースの準備"""
@@ -47,6 +48,41 @@ class Annotation:
         self.logger.info(f"UniProtデータベースの準備が完了: {output_path}")
         return output_path
     
+    def load_protein_transcript_mapping(self):
+        """タンパク質ID→トランスクリプトIDマッピングファイルの読み込み"""
+        mapping_path = self.config['input'].get('protein_transcript_mapping', '')
+        
+        if not mapping_path or not os.path.exists(mapping_path):
+            self.logger.info("タンパク質-トランスクリプトマッピングファイルが指定されていません")
+            return None
+        
+        self.logger.info(f"タンパク質-トランスクリプトマッピングファイルを読み込み中: {mapping_path}")
+        
+        mapping_dict = {}
+        try:
+            with open(mapping_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):  # 空行やコメント行をスキップ
+                        continue
+                    
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        transcript_id = parts[0].strip()
+                        protein_id = parts[1].strip()
+                        # protein_id -> transcript_id のマッピング
+                        mapping_dict[protein_id] = transcript_id
+                    else:
+                        self.logger.warning(f"マッピングファイル行 {line_num}: 形式が不正です - {line}")
+            
+            self.logger.info(f"マッピング辞書を構築: {len(mapping_dict)} エントリ")
+            self.protein_transcript_mapping = mapping_dict
+            return mapping_dict
+            
+        except Exception as e:
+            self.logger.error(f"マッピングファイル読み込みエラー: {e}")
+            raise RuntimeError(f"マッピングファイルの読み込みに失敗しました: {mapping_path}")
+    
     def run_fasta_search(self, query_path, db_path):
         """FASTA検索の実行"""
         # 出力ファイルパス
@@ -64,23 +100,27 @@ class Annotation:
         
         self.logger.info("UniProtデータベースに対するFASTA検索を開始...")
         
-        # ggsearch36実行
+        # ggsearch36実行（intermediate_dirを作業ディレクトリとして使用）
+        query_filename = os.path.basename(query_path)
+        db_filename = os.path.basename(db_path)
+        
         cmd = [
             "docker", "run",
             "-m", "20G",
-            "-v", f"{os.getcwd()}:/data",
-            "-w", "/data",
+            "-v", f"{os.path.abspath(self.intermediate_dir)}:/fasta_work",
+            "-w", "/fasta_work",
             "--rm",
             self.config['fasta_search']['docker_image'],
             "ggsearch36",
             "-Q", "-T", str(self.config['fasta_search']['threads']),
             "-d", "1", "-m10",
             "-E", str(self.config['fasta_search']['evalue']),
-            query_path, db_path
+            query_filename, db_filename
         ]
         
         self.logger.debug(f"FASTA検索実行コマンド: {' '.join(cmd)}")
         
+        # 標準出力をファイルに保存
         with open(output_path, 'w') as f:
             result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
         
@@ -319,6 +359,11 @@ class Annotation:
         """遺伝子の分類（Multi/Single）"""
         self.logger.info("遺伝子の分類を開始...")
         
+        # アノテーション結果の統計用カウンタ
+        total_annotations = 0
+        excluded_count = 0
+        included_count = 0
+        
         # subject_idをキーとしてアノテーション結果を読み込み
         subjects = {}
         
@@ -330,6 +375,19 @@ class Annotation:
                     query_id = fields[0]
                     subject_id = fields[1]
                     description = fields[6]
+                    
+                    total_annotations += 1
+                    
+                    # existing protein modeでマッピングファイルが読み込まれている場合のフィルタリング
+                    if self.protein_transcript_mapping is not None:
+                        if query_id not in self.protein_transcript_mapping:
+                            # マッピングファイルに存在しないIDは除外
+                            excluded_count += 1
+                            self.logger.debug(f"除外されたID（マッピングファイルに未登録）: {query_id}")
+                            continue
+                    
+                    # 解析対象として処理
+                    included_count += 1
                     
                     if subject_id not in subjects:
                         subjects[subject_id] = []
@@ -376,8 +434,25 @@ class Annotation:
                     # 分類情報を追加して出力
                     f.write(f"{entry['line_data']}\t{gene_name}\t{classification}\t{unique_id}\n")
         
+        # フィルタリング結果と統計情報のログ出力
+        if self.protein_transcript_mapping is not None:
+            self.logger.info(f"=== マッピングベースフィルタリング結果 ===")
+            self.logger.info(f"総アノテーション数: {total_annotations}")
+            self.logger.info(f"解析対象数: {included_count}")
+            self.logger.info(f"除外数: {excluded_count}")
+            if total_annotations > 0:
+                inclusion_rate = (included_count / total_annotations) * 100
+                self.logger.info(f"解析対象率: {inclusion_rate:.2f}%")
+            
+            if excluded_count > 0:
+                self.logger.warning(f"{excluded_count} 個のIDがマッピングファイルに存在しないため除外されました")
+        else:
+            self.logger.info(f"TransDecoder mode: 全 {total_annotations} アノテーションを解析対象とします")
+        
         self.logger.info(f"遺伝子分類結果を保存: {classified_path}")
         self.logger.info(f"Multi遺伝子数: {multi_counter - 1}, Single遺伝子数: {single_counter - 1}")
+        self.logger.info(f"総解析対象遺伝子数: {(multi_counter - 1) + (single_counter - 1)}")
+        
         return classified_path
     
     def _extract_gene_name(self, description):
@@ -476,21 +551,107 @@ class Annotation:
                 if isinstance(query_ids, list):
                     # Multi遺伝子の場合
                     for query_id in query_ids:
-                        # query_idから .p1 などを除去
-                        base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
-                        if base_id in sequences:
-                            f.write(f">{unique_id}_{query_id}\n{sequences[base_id]}\n")
+                        sequence_id = self._resolve_sequence_id(query_id)
+                        if sequence_id and sequence_id in sequences:
+                            f.write(f">{unique_id}_{query_id}\n{sequences[sequence_id]}\n")
                         else:
-                            self.logger.warning(f"配列が見つかりません (Multi): {query_id} -> {base_id}")
+                            self.logger.warning(f"配列が見つかりません (Multi): {query_id} -> {sequence_id}")
                 else:
                     # Single遺伝子の場合
                     query_id = query_ids
-                    # query_idから .p1 などを除去
-                    base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
-                    if base_id in sequences:
-                        f.write(f">{unique_id}\n{sequences[base_id]}\n")
+                    sequence_id = self._resolve_sequence_id(query_id)
+                    if sequence_id and sequence_id in sequences:
+                        f.write(f">{unique_id}\n{sequences[sequence_id]}\n")
                     else:
-                        self.logger.warning(f"配列が見つかりません (Single): {query_id} -> {base_id}")
+                        self.logger.warning(f"配列が見つかりません (Single): {query_id} -> {sequence_id}")
+    
+    def _resolve_sequence_id(self, query_id):
+        """
+        クエリIDから実際のシーケンスIDを解決
+        
+        1. タンパク質-トランスクリプトマッピングがある場合、それを使用
+        2. マッピングがない場合、従来の処理（.p1などを除去）を実行
+        
+        Args:
+            query_id (str): クエリID（通常はprotein_id）
+            
+        Returns:
+            str: 実際にFASTAファイル内で使用されるID、またはNone
+        """
+        # マッピングファイルが読み込まれている場合
+        if self.protein_transcript_mapping:
+            # protein_id -> transcript_id マッピングを試行
+            if query_id in self.protein_transcript_mapping:
+                transcript_id = self.protein_transcript_mapping[query_id]
+                self.logger.debug(f"マッピング適用: {query_id} -> {transcript_id}")
+                return transcript_id
+            else:
+                self.logger.debug(f"マッピングが見つかりません: {query_id}")
+        
+        # マッピングがない場合の従来の処理
+        # query_idから .p1 などを除去してトランスクリプトIDとして使用
+        base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
+        self.logger.debug(f"従来の処理適用: {query_id} -> {base_id}")
+        return base_id
+    
+    def _validate_existing_protein_mode_requirements(self):
+        """
+        existing protein modeでの入力要件を検証
+        
+        既存のタンパク質配列を使用する場合、マッピングファイルが必要であることを確認
+        """
+        # existing protein modeかどうかを判定
+        protein_sequences = self.config['input'].get('protein_sequences', '')
+        is_existing_protein_mode = bool(protein_sequences and protein_sequences.strip())
+        
+        if is_existing_protein_mode:
+            self.logger.info("existing protein modeを検出しました")
+            
+            # マッピングファイルの存在確認
+            mapping_path = self.config['input'].get('protein_transcript_mapping', '')
+            
+            if not mapping_path or not mapping_path.strip():
+                raise ValueError(
+                    "existing protein modeではprotein_transcript_mappingパラメータが必須です。"
+                    "タンパク質ID→トランスクリプトIDマッピングファイルを指定してください。"
+                )
+            
+            if not os.path.exists(mapping_path):
+                raise FileNotFoundError(
+                    f"指定されたマッピングファイルが見つかりません: {mapping_path}\n"
+                    f"existing protein modeではprotein_transcript_mappingファイルが必要です。"
+                )
+            
+            # ファイル形式の基本的な確認
+            try:
+                with open(mapping_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()[:10]  # 最初の10行をチェック
+                    
+                valid_lines = 0
+                for line_num, line in enumerate(lines, 1):
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        valid_lines += 1
+                    else:
+                        self.logger.warning(f"マッピングファイル行 {line_num}: TSV形式ではない可能性があります - {line}")
+                
+                if valid_lines == 0:
+                    raise ValueError(
+                        f"マッピングファイルに有効なデータが見つかりません: {mapping_path}\n"
+                        f"ファイル形式がタブ区切り（TSV）であることを確認してください。"
+                    )
+                
+                self.logger.info(f"マッピングファイル形式確認完了: {valid_lines} 有効行を検出")
+                    
+            except Exception as e:
+                raise RuntimeError(f"マッピングファイルの読み込み/検証に失敗しました: {mapping_path}\nエラー: {e}")
+            
+        else:
+            self.logger.info("TransDecoder modeを使用します（マッピングファイルは不要）")
     
     def _create_individual_multi_gene_files(self, transcriptome_path, multi_genes):
         """Multi遺伝子を個別ファイルに分割"""
@@ -526,12 +687,11 @@ class Annotation:
             
             with open(output_file, 'w') as f:
                 for query_id in query_ids:
-                    # query_idから .p1 などを除去
-                    base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
-                    if base_id in sequences:
-                        f.write(f">{unique_id}_{query_id}\n{sequences[base_id]}\n")
+                    sequence_id = self._resolve_sequence_id(query_id)
+                    if sequence_id and sequence_id in sequences:
+                        f.write(f">{unique_id}_{query_id}\n{sequences[sequence_id]}\n")
                     else:
-                        self.logger.warning(f"配列が見つかりません (Multi individual): {query_id} -> {base_id}")
+                        self.logger.warning(f"配列が見つかりません (Multi individual): {query_id} -> {sequence_id}")
             
             self.logger.debug(f"Multi遺伝子個別ファイル作成: {output_file}")
         
@@ -564,17 +724,20 @@ class Annotation:
         
         self.logger.info("Dockerイメージビルド完了")
         
-        # アライメント処理を実行
+        # アライメント処理を実行（intermediate_dirを基準に相対パスで指定）
+        multi_genes_rel_dir = os.path.relpath(multi_genes_dir, self.intermediate_dir)
+        multi_genes_aligned_rel_dir = os.path.relpath(multi_genes_aligned_dir, self.intermediate_dir)
+        
         alignment_cmd = [
             "docker", "run",
             "-m", "4G",
-            "-v", f"{os.getcwd()}:/data",
+            "-v", f"{os.path.abspath(self.intermediate_dir)}:/data",
             "-w", "/data",
             "--rm",
             "run_alignment_and_mask/v1.0",
             "python", "/app/run_alignment_and_mask.py",
-            "-i", multi_genes_dir,
-            "-o", multi_genes_aligned_dir
+            "-i", multi_genes_rel_dir,
+            "-o", multi_genes_aligned_rel_dir
         ]
         
         self.logger.debug(f"アライメント実行コマンド: {' '.join(alignment_cmd)}")
@@ -601,6 +764,12 @@ class Annotation:
             query_path = os.path.join(self.intermediate_dir, 'query.pep')
             if not os.path.exists(query_path):
                 raise FileNotFoundError(f"予測タンパク質配列ファイルが見つかりません: {query_path}")
+            
+            # 入力検証: existing protein modeでのマッピングファイル要件チェック
+            self._validate_existing_protein_mode_requirements()
+            
+            # タンパク質-トランスクリプトマッピングファイルの読み込み
+            self.load_protein_transcript_mapping()
             
             # UniProtデータベースの準備
             db_path = self.prepare_uniprot_db()

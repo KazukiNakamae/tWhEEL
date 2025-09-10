@@ -59,6 +59,9 @@ class GuideDesign:
         # 配列を1行にフォーマット
         self._format_fasta_oneline(output_path)
         
+        # 縮重塩基をNに変換（CrisFlash互換性のため）
+        self._clean_degenerate_bases(output_path)
+        
         self.logger.info(f"Reference sequence prepared for off-target search: {output_path}")
         return output_path
     
@@ -88,6 +91,56 @@ class GuideDesign:
         # 元のファイルを置換
         shutil.move(temp_path, fasta_path)
         self.logger.debug("FASTAファイルを1行形式に変換しました")
+    
+    def _clean_degenerate_bases(self, fasta_path):
+        """縮重塩基をNに変換（CrisFlash互換性のため）"""
+        self.logger.info("縮重塩基をNに変換中...")
+        
+        # 縮重塩基の定義（大文字・小文字両方）
+        degenerate_bases = {
+            'R': 'N', 'r': 'N',  # A or G
+            'Y': 'N', 'y': 'N',  # C or T
+            'S': 'N', 's': 'N',  # G or C
+            'W': 'N', 'w': 'N',  # A or T
+            'K': 'N', 'k': 'N',  # G or T
+            'M': 'N', 'm': 'N',  # A or C
+            'B': 'N', 'b': 'N',  # C or G or T
+            'D': 'N', 'd': 'N',  # A or G or T
+            'H': 'N', 'h': 'N',  # A or C or T
+            'V': 'N', 'v': 'N'   # A or C or G
+        }
+        
+        temp_path = fasta_path + '.clean_temp'
+        conversion_count = 0
+        total_bases = 0
+        
+        with open(fasta_path, 'r') as f_in:
+            with open(temp_path, 'w') as f_out:
+                for line in f_in:
+                    if line.startswith('>'):
+                        # ヘッダー行はそのまま出力
+                        f_out.write(line)
+                    else:
+                        # 配列行の縮重塩基を変換
+                        cleaned_sequence = ""
+                        for base in line.strip():
+                            total_bases += 1
+                            if base in degenerate_bases:
+                                cleaned_sequence += degenerate_bases[base]
+                                conversion_count += 1
+                            else:
+                                cleaned_sequence += base
+                        f_out.write(cleaned_sequence + '\n')
+        
+        # 元のファイルを置換
+        shutil.move(temp_path, fasta_path)
+        
+        # 統計情報をログ出力
+        if conversion_count > 0:
+            conversion_rate = (conversion_count / total_bases) * 100 if total_bases > 0 else 0
+            self.logger.info(f"縮重塩基変換完了: {conversion_count}/{total_bases} 塩基 ({conversion_rate:.2f}%) をNに変換しました")
+        else:
+            self.logger.info("縮重塩基は見つかりませんでした")
     
     def _prepare_multi_genes_aligned(self, aligned_dir):
         """Multi遺伝子アライメント済みファイルを統合"""
@@ -201,6 +254,10 @@ class GuideDesign:
         if os.path.exists(single_genes_path):
             # Single遺伝子を1行形式に変換
             self._format_fasta_oneline(single_genes_path)
+            
+            # 縮重塩基をNに変換（CrisFlash互換性のため）
+            self._clean_degenerate_bases(single_genes_path)
+            
             prepared_files['single_genes'] = single_genes_path
             self.logger.info(f"Single遺伝子ファイルを準備: {single_genes_path}")
         

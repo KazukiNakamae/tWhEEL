@@ -116,19 +116,43 @@ class tWhEELPipeline:
     
     def validate_inputs(self):
         """Validate input files"""
-        # Required files
-        required_files = [
-            ('transcriptome', self.config['input']['transcriptome']),
-            ('uniprot_db', self.config['input']['uniprot_db'])
-        ]
+        # Transcriptome is always required (tWhEEL is a transcriptome-based pipeline)
+        transcriptome = self.config['input'].get('transcriptome', '')
+        if not transcriptome:
+            self.logger.error("Required parameter not set: transcriptome")
+            self.logger.error("tWhEEL is a transcriptome-based pipeline - transcriptome file is always required")
+            return False
+        if not os.path.exists(transcriptome):
+            self.logger.error(f"Transcriptome file not found: {transcriptome}")
+            return False
         
-        for name, filepath in required_files:
-            if not filepath:
-                self.logger.error(f"Required parameter not set: {name}")
-                return False
-            if not os.path.exists(filepath):
-                self.logger.error(f"File not found: {filepath}")
-                return False
+        # UniProt database is always required
+        uniprot_db = self.config['input']['uniprot_db']
+        if not uniprot_db:
+            self.logger.error("Required parameter not set: uniprot_db")
+            return False
+        if not os.path.exists(uniprot_db):
+            self.logger.error(f"UniProt database file not found: {uniprot_db}")
+            return False
+        
+        # Check processing mode: existing protein sequences (optional) + transcriptome (required)
+        protein_sequences = self.config['input'].get('protein_sequences', '')
+        
+        if protein_sequences and os.path.exists(protein_sequences):
+            # Existing protein sequences mode - still requires transcriptome for downstream analysis
+            self.logger.info("Existing protein sequences mode: Using pre-computed proteins + transcriptome data")
+            self.logger.info(f"Protein sequences file: {protein_sequences}")
+            self.logger.info(f"Transcriptome file: {transcriptome}")
+            self.logger.info("TransDecoder will be skipped, but transcriptome data will be used for guide design and other analyses")
+            
+        else:
+            # Standard TransDecoder mode
+            self.logger.info("TransDecoder mode: Using transcriptome for ORF prediction")
+            self.logger.info(f"Transcriptome file: {transcriptome}")
+            
+            if protein_sequences:
+                self.logger.warning(f"Specified protein sequences file not found: {protein_sequences}")
+                self.logger.warning("Falling back to TransDecoder mode")
         
         # Optional genome assembly validation
         genome_assembly = self.config['input']['genome_assembly']

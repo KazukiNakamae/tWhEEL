@@ -170,15 +170,34 @@ cp config/default.yaml config/my_analysis.yaml
 #### Required Parameters
 ```yaml
 input:
-  transcriptome: "/path/to/transcriptome.fasta"     # FASTA format transcriptome assembly
-  uniprot_db: "/path/to/uniprot_sprot.fasta"       # UniProt Swiss-Prot database
+  transcriptome: "/path/to/transcriptome.fasta"    # FASTA format transcriptome assembly (always required)
+  uniprot_db: "/path/to/uniprot_sprot.fasta"       # UniProt Swiss-Prot database (always required)
 ```
 
 #### Optional Parameters
 ```yaml
 input:
+  protein_sequences: "/path/to/proteins.fasta"     # Existing amino acid sequences (skips TransDecoder)
   genome_assembly: "/path/to/genome.fasta"         # Genome assembly for comprehensive off-target analysis
 ```
+
+#### Processing Modes
+The pipeline supports two processing modes, but **transcriptome is always required**:
+
+**1. Standard TransDecoder Mode (Default)**
+- Uses transcriptome assembly for ORF prediction
+- Requires `transcriptome` parameter
+- Runs TransDecoder → BUSCO → Functional annotation
+- Transcriptome data used throughout downstream analysis
+
+**2. Existing Protein Mode**
+- Uses pre-computed amino acid sequences + transcriptome data
+- Requires both `transcriptome` and `protein_sequences` parameters
+- Skips TransDecoder → BUSCO → Functional annotation
+- Transcriptome data still used for guide design and other analyses
+- Useful when ORF prediction has already been performed
+
+**Important**: tWhEEL is a transcriptome-based pipeline. The transcriptome file is always required as it provides essential information for guide RNA design, sequence extraction, and downstream analyses, even when using existing protein sequences.
 
 **Note**: If `genome_assembly` is not provided, the transcriptome will be used for off-target analysis, which may be less comprehensive but still functional.
 
@@ -679,6 +698,19 @@ fasta_search:
 python src/twheel.py --config config/small_dataset.yaml --name small_species_analysis
 ```
 
+### Example Usage: Comparing TransDecoder vs Existing Proteins
+```bash
+# Method 1: Traditional TransDecoder approach
+python src/twheel.py --config config/transcriptome_analysis.yaml --name transcriptome_mode
+
+# Method 2: Using existing protein sequences (faster)
+python src/twheel.py --config config/existing_protein.yaml --name protein_mode
+
+# Compare results between both approaches
+ls -la outputs/tWhEEL_on_*_transcriptome_mode/
+ls -la outputs/tWhEEL_on_*_protein_mode/
+```
+
 ### Example 2: Large Transcriptome Analysis (> 100,000 transcripts)
 ```yaml
 # config/large_dataset.yaml
@@ -693,7 +725,28 @@ docker:
   max_memory: "64g"
 ```
 
-### Example 3: Memory-Constrained Environment
+### Example 3: Using Existing Protein Sequences
+```yaml
+# config/existing_protein.yaml
+input:
+  protein_sequences: "/path/to/existing_proteins.fasta"  # Pre-computed protein sequences
+  uniprot_db: "/path/to/uniprot_sprot.fasta"
+  genome_assembly: "/path/to/genome.fasta"              # Optional
+
+transdecoder:
+  skip_if_protein_provided: true  # Skip TransDecoder when protein_sequences is provided
+
+# Continue with normal CRISPR and GO analysis settings
+crispr:
+  memory: "40g"
+  threads: 10
+```
+
+```bash
+python src/twheel.py --config config/existing_protein.yaml --name protein_analysis
+```
+
+### Example 4: Memory-Constrained Environment
 ```yaml
 # config/low_memory.yaml
 crispr:
