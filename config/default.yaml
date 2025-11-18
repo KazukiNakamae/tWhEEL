@@ -2,11 +2,11 @@
 
 # 入力ファイル設定
 input:
-  transcriptome: ""    # トランスクリプトームファイル (.fsa_nt or .fa) - 必須 (tWhEELはトランスクリプトームベースパイプライン)
-  protein_sequences: ""  # 既存のアミノ酸配列ファイル (.fasta/.fa/.pep) - オプション (指定時はTransDecoderをスキップ)
-  protein_transcript_mapping: ""  # タンパク質ID→トランスクリプトIDマッピングファイル (.tsv) - 既存タンパク質モード時に必須
-  genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa) - オプション (未指定の場合はtranscriptomeを使用)
-  uniprot_db: ""       # UniProtデータベースファイル (.fasta) - 必須
+  transcriptome: ""    # トランスクリプトームファイル (.fsa_nt or .fa)
+  protein_sequences: ""  # 既存のアミノ酸配列ファイル (.fasta/.fa/.pep)
+  protein_transcript_mapping: ""  # タンパク質ID→トランスクリプトIDマッピングファイル (.tsv) 
+  genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa)
+  uniprot_db: ""       # タンパクデータベースファイル (.fasta)
 
 # 出力ディレクトリ設定
 output:

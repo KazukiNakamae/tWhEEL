@@ -3,19 +3,19 @@
 
 # 入力ファイル設定
 input:
-  # トランスクリプトームファイル（必須 - tWhEELはトランスクリプトームベースパイプライン）
+  # トランスクリプトームファイル
   transcriptome: "/path/to/your/transcriptome.fasta"  # .fsa_nt, .fa形式対応
   
-  # 既存のアミノ酸配列ファイル（オプション - TransDecoderをスキップ）
+  # 既存のアミノ酸配列ファイル
   protein_sequences: "/path/to/your/existing_proteins.fasta"  # .fasta, .fa, .pep形式対応
   
-  # タンパク質ID→トランスクリプトIDマッピングファイル（既存タンパク質モード時に必須）
+  # タンパク質ID→トランスクリプトIDマッピングファイル
   protein_transcript_mapping: "/path/to/your/protein_transcript_mapping.tsv"  # タブ区切り形式: protein_id<TAB>transcript_id
   
-  # UniProtデータベース（必須）
+  # タンパクデータベース
   uniprot_db: "/path/to/uniprot_sprot.fasta"
   
-  # ゲノムアセンブリ（オプション - より正確なオフターゲット解析のため）
+  # ゲノムアセンブリ
   genome_assembly: "/path/to/genome.fasta"
 
 # 出力ディレクトリ設定
@@ -35,7 +35,7 @@ busco:
   lineage: "metazoa_odb10"  # 使用する生物のデータベースに応じて変更
   cpu: 8
 
-# FASTA検索設定（UniProtに対する機能アノテーション）
+# FASTA検索設定（タンパクに対する機能アノテーション）
 fasta_search:
   docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
   evalue: 0.1

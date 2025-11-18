@@ -18,8 +18,11 @@ from datetime import datetime
 # モジュールのインポート
 from modules.gene_prediction import GenePrediction
 from modules.annotation import Annotation
+from modules.sgd_annotation import Sgd_annotation
 from modules.guide_design import GuideDesign
 from modules.go_analysis import GOAnalysis
+from modules.pathway_analysis import PathwayAnalysis
+from modules.pathway_report_generator import PathwayReportGenerator
 from modules.report_generator import ReportGenerator
 
 
@@ -180,6 +183,10 @@ class tWhEELPipeline:
             elif step_name == "annotation":
                 annotator = Annotation(self.config)
                 annotator.run()
+
+            elif step_name == "sgd_annotation":
+                sgd_annotator = Sgd_annotation(self.config)
+                sgd_annotator.run()
                 
             elif step_name == "guide_design":
                 guide_designer = GuideDesign(self.config)
@@ -188,6 +195,14 @@ class tWhEELPipeline:
             elif step_name == "go_analysis":
                 go_analyzer = GOAnalysis(self.config)
                 go_analyzer.run()
+                
+            elif step_name == "pathway_analysis":
+                pathway_analyzer = PathwayAnalysis(self.config)
+                pathway_analyzer.run()
+                
+            elif step_name == "pathway_report_generation":
+                pathway_report_gen = PathwayReportGenerator(self.config)
+                pathway_report_gen.run()
                 
             elif step_name == "report_generation":
                 report_gen = ReportGenerator(self.config)
