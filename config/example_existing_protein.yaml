@@ -12,8 +12,8 @@ input:
   # タンパク質ID→トランスクリプトIDマッピングファイル
   protein_transcript_mapping: "/path/to/your/protein_transcript_mapping.tsv"  # タブ区切り形式: protein_id<TAB>transcript_id
   
-  # タンパクデータベース
-  uniprot_db: "/path/to/uniprot_sprot.fasta"
+  # GO解析用タンパク質データベース
+  protein_db_for_goanalysis: "/path/to/uniprot_sprot.fasta"
   
   # ゲノムアセンブリ
   genome_assembly: "/path/to/genome.fasta"

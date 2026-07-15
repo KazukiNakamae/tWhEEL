@@ -12,8 +12,8 @@ input:
   # タンパク質ID→トランスクリプトIDマッピングファイル
   protein_transcript_mapping: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.62.gff3.tx2protein.tsv"  # タブ区切り形式: protein_id<TAB>transcript_id
   
-  # タンパクデータベース
-  uniprot_db: "./LOCAL_DATA/db/uniprot_sprot.fasta"
+  # GO解析用タンパク質データベース
+  protein_db_for_goanalysis: "./LOCAL_DATA/db/uniprot_sprot.fasta"
   
   # ゲノムアセンブリ
   genome_assembly: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.dna_rm.toplevel.fa"

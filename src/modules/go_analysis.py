@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GO解析モジュール
+Gene Ontology Analysis Module
 GO Knock-out Feasibility Index (GO-KF)の計算とGO機能解析
 """
 
@@ -12,14 +12,14 @@ from pathlib import Path
 
 
 class GOAnalysis:
-    """GO解析処理クラス"""
+    """Gene Ontology analysis processing class"""
     
     def __init__(self, config):
         """
-        初期化
+        Initialize
         
         Args:
-            config (dict): 設定辞書
+            config (dict): Configuration dictionary
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
@@ -27,18 +27,18 @@ class GOAnalysis:
         self.docker_dir = os.path.join('src', 'docker')
     
     def _check_docker_image_exists(self, image_name):
-        """Dockerイメージが存在するかチェック"""
+        """Check if a Docker image exists."""
         try:
             cmd = ["docker", "images", "-q", image_name]
             result = subprocess.run(cmd, capture_output=True, text=True)
             return bool(result.stdout.strip())
         except Exception as e:
-            self.logger.warning(f"Dockerイメージ存在チェック中にエラー: {e}")
+            self.logger.warning(f"Error during Docker image existence check: {e}")
             return False
         
     def build_docker_images(self):
-        """カスタムDockerイメージのビルド（既存イメージチェック機能付き）"""
-        self.logger.info("カスタムDockerイメージの準備を開始...")
+        """Build custom Docker images (with existing image check)"""
+        self.logger.info("Start preparing your custom Docker image...")
         
         # 必要なDockerイメージのリスト
         docker_images = [
@@ -52,14 +52,14 @@ class GOAnalysis:
         for folder_name, image_name in docker_images:
             # 既存イメージのチェック
             if self._check_docker_image_exists(image_name):
-                self.logger.info(f"Dockerイメージが既に存在します（ビルドをスキップ）: {image_name}")
+                self.logger.info(f"A Docker image already exists (skip build).: {image_name}")
                 continue
             
             # イメージが存在しない場合、ビルドを実行
             docker_path = os.path.join(self.docker_dir, folder_name)
             
             if os.path.exists(docker_path):
-                self.logger.info(f"Dockerイメージをビルド中: {image_name}")
+                self.logger.info(f"Building Docker image: {image_name}")
                 build_needed = True
                 
                 cmd = [
@@ -71,31 +71,31 @@ class GOAnalysis:
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 
                 if result.returncode != 0:
-                    self.logger.error(f"Dockerビルドエラー ({image_name}): {result.stderr}")
+                    self.logger.error(f"Docker build error ({image_name}): {result.stderr}")
                     
                     # 権限エラーの場合は追加情報を提供
                     if "permission denied" in result.stderr.lower():
-                        self.logger.error("Docker権限エラーが発生しました。以下を確認してください:")
-                        self.logger.error("1. Dockerデーモンが起動していることを確認")
-                        self.logger.error("2. ユーザーがdockerグループに属していることを確認")
-                        self.logger.error("3. 'sudo docker build'の使用を検討")
+                        self.logger.error("A Docker permission error occurred. Please check the following::")
+                        self.logger.error("1. Verify that the Docker daemon is running.")
+                        self.logger.error("2. Verify that the user belongs to the docker group.")
+                        self.logger.error("3. Consider using 'sudo docker build'.")
                     
-                    raise RuntimeError(f"Dockerイメージのビルドに失敗しました: {image_name}")
+                    raise RuntimeError(f"The Docker image build failed.: {image_name}")
                 
-                self.logger.info(f"Dockerイメージビルド完了: {image_name}")
+                self.logger.info(f"Docker image build complete: {image_name}")
             else:
-                self.logger.warning(f"Dockerディレクトリが見つかりません: {docker_path}")
-                self.logger.warning(f"イメージ '{image_name}' が存在しないため、処理を続行できません")
-                raise FileNotFoundError(f"Dockerディレクトリが見つかりません: {docker_path}")
+                self.logger.warning(f"Docker directory not found.: {docker_path}")
+                self.logger.warning(f"Processing cannot continue because the image '{image_name}' does not exist.")
+                raise FileNotFoundError(f"Docker directory not found.: {docker_path}")
         
         if build_needed:
-            self.logger.info("カスタムDockerイメージのビルドが完了しました")
+            self.logger.info("The custom Docker image build is complete.")
         else:
-            self.logger.info("必要なDockerイメージは全て準備済みです")
+            self.logger.info("All necessary Docker images are already prepared.")
     
     def add_go_annotations(self, input_path):
-        """GOアノテーションの追加"""
-        self.logger.info("GOアノテーションを追加中...")
+        """Adding GO annotations"""
+        self.logger.info("Adding GO annotations...")
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'annotation_with_guides_go.tsv')
@@ -109,19 +109,19 @@ class GOAnalysis:
             f"/DATA/{output_path}"
         ]
         
-        self.logger.debug(f"GOアノテーション追加コマンド: {' '.join(cmd)}")
+        self.logger.debug(f"GO annotation addition command: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
-            self.logger.error(f"GOアノテーション追加エラー: {result.stderr}")
-            raise RuntimeError("GOアノテーション追加に失敗しました")
+            self.logger.error(f"GO annotation addition error: {result.stderr}")
+            raise RuntimeError("Failed to add GO annotation.")
         
-        self.logger.info(f"GOアノテーション追加完了: {output_path}")
+        self.logger.info(f"GO annotation added.: {output_path}")
         return output_path
     
     def compute_go_kfi(self, input_path):
-        """GO Knock-out Feasibility Index (GO-KF)の計算"""
-        self.logger.info("GO-KFIを計算中...")
+        """Calculation of the GO Knock-out Feasibility Index (GO-KF)"""
+        self.logger.info("Calculating GO-KFI...")
         
         # 出力ファイルパス
         kfi_table_path = os.path.join(self.intermediate_dir, 'go_kfi_table.csv')
@@ -137,23 +137,23 @@ class GOAnalysis:
             "-s", f"/DATA/{kfi_stat_path}"
         ]
         
-        self.logger.debug(f"GO-KFI計算コマンド: {' '.join(cmd)}")
+        self.logger.debug(f"GO-KFI calculation command: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
-            self.logger.error(f"GO-KFI計算エラー: {result.stderr}")
-            raise RuntimeError("GO-KFI計算に失敗しました")
+            self.logger.error(f"GO-KFI calculation error: {result.stderr}")
+            raise RuntimeError("GO-KFI calculation failed.")
         
         # 結果をログに出力
-        self.logger.info("GO-KFI計算結果:")
+        self.logger.info("GO-KFI calculation results:")
         self.logger.info(result.stdout)
         
-        self.logger.info(f"GO-KFI計算完了: {kfi_table_path}, {kfi_stat_path}")
+        self.logger.info(f"GO-KFI calculation complete: {kfi_table_path}, {kfi_stat_path}")
         return kfi_table_path, kfi_stat_path
     
     def extract_fully_targetable_gos(self, kfi_table_path):
-        """Fully targetable GOsの抽出"""
-        self.logger.info("Fully targetable GOsを抽出中...")
+        """Extraction of Fully Targetable Goals"""
+        self.logger.info("Extracting fully targetable GOs....")
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'go_kfi_table_fully_targetable.csv')
@@ -184,14 +184,14 @@ class GOAnalysis:
             next(reader)  # ヘッダーをスキップ
             fully_targetable_count = sum(1 for _ in reader)
         
-        self.logger.info(f"Fully targetable GOs数: {fully_targetable_count}")
-        self.logger.info(f"Fully targetable GOs抽出完了: {output_path}")
+        self.logger.info(f"Number of fully targetable GOs: {fully_targetable_count}")
+        self.logger.info(f"Fully targetable GOs extraction completed: {output_path}")
         
         return output_path
     
     def count_go_parent_terms(self, fully_targetable_path):
         """GO親termの計算とvisualization"""
-        self.logger.info("GO親termの計算とvisualizationを実行中...")
+        self.logger.info("Performing calculation and visualization of GO parent term....")
         
         # 出力ファイルパス
         parent_csv_path = os.path.join(self.intermediate_dir, 'go_parent_counts.csv')
@@ -205,11 +205,11 @@ class GOAnalysis:
                 next(f)
                 go_count = sum(1 for _ in f)
         except Exception as e:
-            self.logger.warning(f"Fully targetable GOsファイルの読み込みエラー: {e}")
+            self.logger.warning(f"Fully targetable GOs file loading error: {e}")
         
         if go_count == 0:
-            self.logger.warning("Fully targetable GOsが0個のため、GO親term分析をスキップします")
-            self.logger.info("このデータセットでは、完全にターゲット可能なGO termが見つかりませんでした")
+            self.logger.warning("Since there are 0 fully targetable GOs, the GO parent term analysis will be skipped.")
+            self.logger.info("No fully targetable GO terms were found in this dataset.")
             
             # 空の結果ファイルを作成
             with open(parent_csv_path, 'w') as f:
@@ -218,19 +218,19 @@ class GOAnalysis:
             # 空のPNGファイルの代替として説明ファイルを作成
             no_data_message = os.path.join(self.intermediate_dir, 'go_parent_counts_no_data.txt')
             with open(no_data_message, 'w') as f:
-                f.write("GO親term可視化結果\n")
+                f.write("GO parent term visualization results\n")
                 f.write("===================\n\n")
-                f.write("Fully targetable GO terms: 0個\n")
-                f.write("可視化対象データがないため、グラフは生成されませんでした。\n\n")
-                f.write("考えられる原因:\n")
-                f.write("- CRISPRガイド標的が設計されていないGO terms\n")
-                f.write("- GO-KFI計算での閾値設定\n")
-                f.write("- 入力データのフィルタリング条件\n")
+                f.write("Fully targetable GO terms: 0 pieces\n")
+                f.write("The graph was not generated because there was no data to visualize.\n\n")
+                f.write("Possible causes:\n")
+                f.write("- CRISPR guide targets not designed for GO terms\n")
+                f.write("- Threshold setting in GO-KFI calculation\n")
+                f.write("- Filtering conditions for input data\n")
             
-            self.logger.info(f"GO親term分析スキップ完了: 結果説明ファイル {no_data_message}")
+            self.logger.info(f"GO Parent term analysis skipped: Results explanation file {no_data_message}")
             return parent_csv_path, no_data_message
         
-        self.logger.info(f"処理対象のFully targetable GOs: {go_count}個")
+        self.logger.info(f"Fully targetable GOs to be processed: {go_count}個")
         
         # DockerでGO親term分析
         cmd = [
@@ -244,19 +244,19 @@ class GOAnalysis:
             "--out_png", f"/DATA/{parent_png_path}"
         ]
         
-        self.logger.debug(f"GO親term分析コマンド: {' '.join(cmd)}")
+        self.logger.debug(f"GO parent term analysis command: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
-            self.logger.error(f"GO親term分析エラー: {result.stderr}")
-            raise RuntimeError("GO親term分析に失敗しました")
+            self.logger.error(f"GO parent term analysis error: {result.stderr}")
+            raise RuntimeError("GO parent term analysis failed.")
         
-        self.logger.info(f"GO親term分析完了: {parent_csv_path}, {parent_png_path}")
+        self.logger.info(f"GO parent term analysis complete: {parent_csv_path}, {parent_png_path}")
         return parent_csv_path, parent_png_path
     
     def parse_go_kfi_statistics(self, kfi_stat_path):
         """GO-KFI統計の解析"""
-        self.logger.info("GO-KFI統計を解析中...")
+        self.logger.info("Analyzing GO-KFI statistics...")
         
         stats = {}
         
@@ -301,15 +301,15 @@ class GOAnalysis:
                     stats['not_targetable_count'] = int(not_match.group(1))
                 
         except Exception as e:
-            self.logger.error(f"GO-KFI統計解析エラー: {e}")
+            self.logger.error(f"GO-KFI statistical analysis error: {e}")
             stats = {}
         
-        self.logger.info(f"GO-KFI統計解析完了: {stats}")
+        self.logger.info(f"GO-KFI statistical analysis completed: {stats}")
         return stats
     
     def create_go_reverse_lookup(self, go_annotated_path):
         """GO termから逆引き検索可能なデータ構造を作成"""
-        self.logger.info("GO逆引き検索データを作成中...")
+        self.logger.info("Creating GO reverse lookup data....")
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'go_reverse_lookup.tsv')
@@ -320,7 +320,7 @@ class GOAnalysis:
             csv.field_size_limit(1000000)  # 1MBに増加
         except OverflowError:
             csv.field_size_limit(max_field_size)  # システムの最大値を使用
-            self.logger.warning(f"CSVフィールドサイズ制限を最大値 {max_field_size} に設定")
+            self.logger.warning(f"Set the CSV field size limit to the maximum value {max_field_size}.")
         
         # GOアノテーションファイルを読み込み
         go_to_genes = {}
@@ -333,7 +333,7 @@ class GOAnalysis:
                 
                 # GO termの列を特定
                 go_columns = [i for i, col in enumerate(header) if 'GO' in col.upper()]
-                self.logger.debug(f"GOアノテーション列: {[header[i] for i in go_columns]}")
+                self.logger.debug(f"GO annotation column: {[header[i] for i in go_columns]}")
                 
                 line_count = 0
                 for line in f:
@@ -370,13 +370,13 @@ class GOAnalysis:
                                             go_to_genes[go_term].append(gene_info)
                     
                     except Exception as e:
-                        self.logger.warning(f"行 {line_count} の処理でエラー: {e}")
+                        self.logger.warning(f"Error processing line {line_count}: {e}")
                         continue
                 
-                self.logger.info(f"総処理行数: {line_count}")
+                self.logger.info(f"Total number of rows processed: {line_count}")
         
         except Exception as e:
-            self.logger.error(f"GOアノテーションファイル読み込みエラー: {e}")
+            self.logger.error(f"GO annotation file loading error: {e}")
             raise
         finally:
             # CSVフィールドサイズ制限を元に戻す
@@ -400,17 +400,17 @@ class GOAnalysis:
                 
                 f.write(f"{go_term}\t{gene_count}\t{';'.join(gene_list)}\n")
         
-        self.logger.info(f"GO逆引き検索データ作成完了: {output_path}")
-        self.logger.info(f"総GO term数: {len(go_to_genes)}")
+        self.logger.info(f"GO reverse lookup data creation complete.: {output_path}")
+        self.logger.info(f"Total number of GO terms: {len(go_to_genes)}")
         return output_path
     
     def run(self):
-        """GO解析の全体実行"""
+        """Execute entire GO analysis"""
         try:
             # 前段階の結果を確認
             input_path = os.path.join(self.intermediate_dir, 'annotation_with_guides_final.tsv')
             if not os.path.exists(input_path):
-                raise FileNotFoundError(f"アノテーション-ガイド結合ファイルが見つかりません: {input_path}")
+                raise FileNotFoundError(f"Annotation-guide combined file not found.: {input_path}")
             
             # カスタムDockerイメージのビルド
             self.build_docker_images()
@@ -449,25 +449,25 @@ class GOAnalysis:
             # 結果をファイルに保存
             results_file = os.path.join(self.intermediate_dir, 'go_analysis_results.txt')
             with open(results_file, 'w', encoding='utf-8') as f:
-                f.write("=== GO解析結果 ===\n\n")
-                f.write(f"入力ファイル: {input_path}\n")
-                f.write(f"GOアノテーション付きファイル: {go_annotated_path}\n")
-                f.write(f"GO-KFIテーブル: {kfi_table_path}\n")
-                f.write(f"GO-KFI統計: {kfi_stat_path}\n")
+                f.write("=== GO analysis results ===\n\n")
+                f.write(f"input file: {input_path}\n")
+                f.write(f"GO annotated file: {go_annotated_path}\n")
+                f.write(f"GO-KFI Table: {kfi_table_path}\n")
+                f.write(f"GO-KFI Statistics: {kfi_stat_path}\n")
                 f.write(f"Fully targetable GOs: {fully_targetable_path}\n")
-                f.write(f"GO親term分析: {parent_csv_path}\n")
-                f.write(f"GO親term可視化: {parent_png_path}\n")
-                f.write(f"GO逆引き検索: {reverse_lookup_path}\n\n")
+                f.write(f"GO Parent Term Analysis: {parent_csv_path}\n")
+                f.write(f"GO parent term visualization: {parent_png_path}\n")
+                f.write(f"GO Reverse Lookup: {reverse_lookup_path}\n\n")
                 
-                f.write("=== GO-KFI統計 ===\n")
+                f.write("=== GO-KFI Statistics ===\n")
                 for key, value in kfi_stats.items():
                     f.write(f"{key}: {value}\n")
             
-            self.logger.info(f"GO解析結果を保存: {results_file}")
-            self.logger.info("GO解析処理が完了しました")
+            self.logger.info(f"Save GO analysis results: {results_file}")
+            self.logger.info("GO analysis process completed.")
             
             return results
             
         except Exception as e:
-            self.logger.error(f"GO解析処理でエラーが発生しました: {e}")
+            self.logger.error(f"An error occurred during the GO parsing process.: {e}")
             raise

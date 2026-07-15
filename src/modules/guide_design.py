@@ -17,17 +17,17 @@ class GuideDesign:
     
     def __init__(self, config):
         """
-        初期化
+        Initialize
         
         Args:
-            config (dict): 設定辞書
+            config (dict): Configuration dictionary
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.intermediate_dir = self.config['output']['intermediate']
         
     def prepare_genome_assembly(self):
-        """ゲノムアセンブリファイルの準備（transcriptomeをフォールバックとして使用）"""
+        """Prepare genome assembly file (using transcriptome as fallback)"""
         genome_path = self.config['input']['genome_assembly']
         
         # 出力ファイルパス
@@ -59,7 +59,7 @@ class GuideDesign:
         # 配列を1行にフォーマット
         self._format_fasta_oneline(output_path)
         
-        # 縮重塩基をNに変換（CrisFlash互換性のため）
+        # Convert degenerate bases to N (for CrisFlash compatibility)
         self._clean_degenerate_bases(output_path)
         
         self.logger.info(f"Reference sequence prepared for off-target search: {output_path}")
@@ -90,11 +90,11 @@ class GuideDesign:
         
         # 元のファイルを置換
         shutil.move(temp_path, fasta_path)
-        self.logger.debug("FASTAファイルを1行形式に変換しました")
+        self.logger.debug("The FASTA file has been converted to single-line format.")
     
     def _clean_degenerate_bases(self, fasta_path):
-        """縮重塩基をNに変換（CrisFlash互換性のため）"""
-        self.logger.info("縮重塩基をNに変換中...")
+        """Convert degenerate bases to N (for CrisFlash compatibility)"""
+        self.logger.info("Converting degenerate base to N...")
         
         # 縮重塩基の定義（大文字・小文字両方）
         degenerate_bases = {
@@ -138,13 +138,13 @@ class GuideDesign:
         # 統計情報をログ出力
         if conversion_count > 0:
             conversion_rate = (conversion_count / total_bases) * 100 if total_bases > 0 else 0
-            self.logger.info(f"縮重塩基変換完了: {conversion_count}/{total_bases} 塩基 ({conversion_rate:.2f}%) をNに変換しました")
+            self.logger.info(f"Degenerate base conversion complete: {conversion_count}/{total_bases} bases ({conversion_rate:.2f}%) converted to N")
         else:
-            self.logger.info("縮重塩基は見つかりませんでした")
+            self.logger.info("No degenerate bases were found.")
     
     def _prepare_multi_genes_aligned(self, aligned_dir):
-        """Multi遺伝子アライメント済みファイルを統合"""
-        self.logger.info("Multi遺伝子アライメント済みファイルを統合中...")
+        """Integrate multi-gene alignment files"""
+        self.logger.info("Integrating multi-gene alignment files....")
         
         aligned_dir_path = Path(aligned_dir)
         
@@ -152,10 +152,10 @@ class GuideDesign:
         aligned_files = list(aligned_dir_path.glob("*_aligned_consensus.fa"))
         
         if not aligned_files:
-            self.logger.warning("アライメント済みファイルが見つかりません")
+            self.logger.warning("Aligned files not found.")
             return None
         
-        self.logger.info(f"見つかったアライメント済みファイル数: {len(aligned_files)}")
+        self.logger.info(f"Number of aligned files found: {len(aligned_files)}")
         
         # 一時的なoneliner形式ファイルを作成するディレクトリ
         oneline_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned_oneline')
@@ -172,7 +172,7 @@ class GuideDesign:
             self._convert_to_oneline_format(aligned_file, oneline_path)
             oneline_files.append(oneline_path)
             
-            self.logger.debug(f"1行形式変換完了: {oneline_filename}")
+            self.logger.debug(f"Single line format conversion completed: {oneline_filename}")
         
         # 全てのファイルを統合
         combined_path = os.path.join(self.intermediate_dir, 'multi_genes_aligned_oneline.fa')
@@ -185,13 +185,13 @@ class GuideDesign:
                 # ヘッダーとWindowsのCR対策を適用して統合
                 self._merge_file_with_header_replacement(oneline_file, base_name, f_out)
         
-        self.logger.info(f"Multi遺伝子アライメント済みファイル統合完了: {combined_path}")
-        self.logger.info(f"統合されたファイル数: {len(oneline_files)}")
+        self.logger.info(f"Multi-gene alignment file integration complete.: {combined_path}")
+        self.logger.info(f"Number of integrated files: {len(oneline_files)}")
         
         return combined_path
     
     def _convert_to_oneline_format(self, input_path, output_path):
-        """FASTAファイルをoneliner形式に変換（Perl相当の処理）"""
+        """Convert FASTA files to oneliner format (processing equivalent to Perl in FanFlow)."""
         with open(input_path, 'r') as f_in:
             with open(output_path, 'w') as f_out:
                 sequence_buffer = ""
@@ -216,7 +216,7 @@ class GuideDesign:
                     f_out.write(f"{header_line}\n{sequence_buffer}\n")
     
     def _merge_file_with_header_replacement(self, file_path, header_name, output_file):
-        """ファイルをヘッダー置換して出力ファイルにマージ"""
+        """Merge file with header replacement to output file"""
         with open(file_path, 'r') as f_in:
             for line in f_in:
                 # 行末のCR(\r)を削除（Windowsの改行対策）
@@ -231,7 +231,7 @@ class GuideDesign:
                         output_file.write(f"{line}\n")
     
     def prepare_gene_sequences(self):
-        """遺伝子配列ファイルの準備"""
+        """Prepare gene sequence files"""
         prepared_files = {}
         
         # Multi遺伝子の処理（アライメント済みファイルを統合）
@@ -240,14 +240,14 @@ class GuideDesign:
             multi_genes_oneline_path = self._prepare_multi_genes_aligned(multi_genes_aligned_dir)
             if multi_genes_oneline_path:
                 prepared_files['multi_genes'] = multi_genes_oneline_path
-                self.logger.info(f"Multi遺伝子アライメント済みファイルを準備: {multi_genes_oneline_path}")
+                self.logger.info(f"Prepare a file with multi-gene alignment.: {multi_genes_oneline_path}")
         else:
             # フォールバック: 従来のmulti_genes.faを使用
             multi_genes_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
             if os.path.exists(multi_genes_path):
                 self._format_fasta_oneline(multi_genes_path)
                 prepared_files['multi_genes'] = multi_genes_path
-                self.logger.info(f"Multi遺伝子ファイル（非アライメント）を準備: {multi_genes_path}")
+                self.logger.info(f"Prepare a multi-gene file (non-aligned).: {multi_genes_path}")
         
         # Single遺伝子の処理
         single_genes_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
@@ -255,20 +255,20 @@ class GuideDesign:
             # Single遺伝子を1行形式に変換
             self._format_fasta_oneline(single_genes_path)
             
-            # 縮重塩基をNに変換（CrisFlash互換性のため）
+            # Convert degenerate bases to N (for CrisFlash compatibility)
             self._clean_degenerate_bases(single_genes_path)
             
             prepared_files['single_genes'] = single_genes_path
-            self.logger.info(f"Single遺伝子ファイルを準備: {single_genes_path}")
+            self.logger.info(f"Prepare a single gene file.: {single_genes_path}")
         
         if not prepared_files:
-            raise FileNotFoundError("Multi遺伝子またはSingle遺伝子ファイルが見つかりません")
+            raise FileNotFoundError("No multi-gene or single-gene file was found.")
         
         return prepared_files
     
     def run_crisflash(self, genome_path, gene_path, gene_type):
         """CrisFlashによるガイド標的設計"""
-        self.logger.info(f"{gene_type}遺伝子に対するCrisFlashを実行中...")
+        self.logger.info(f"Running CrisFlash on the {gene_type} genes...")
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, f'{gene_type}_targets.bed')
@@ -289,24 +289,24 @@ class GuideDesign:
             "-o", f"/data/{output_path}"
         ]
         
-        self.logger.debug(f"CrisFlash実行コマンド: {' '.join(cmd)}")
+        self.logger.debug(f"CrisFlash execution command: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
-            self.logger.error(f"CrisFlash実行エラー: {result.stderr}")
-            raise RuntimeError(f"CrisFlash実行に失敗しました ({gene_type})")
+            self.logger.error(f"CrisFlash execution error: {result.stderr}")
+            raise RuntimeError(f"CrisFlash execution failed. ({gene_type})")
         
-        self.logger.info(f"{gene_type}のガイド標的設計が完了: {output_path}")
+        self.logger.info(f"Guide target design for {gene_type} is complete.: {output_path}")
         
         # 結果の統計を取得
         if os.path.exists(output_path):
             line_count = self._count_lines(output_path)
-            self.logger.info(f"{gene_type}のガイド標的数: {line_count}")
+            self.logger.info(f"Number of guide targets for {gene_type}: {line_count}")
         
         return output_path
     
     def _count_lines(self, file_path):
-        """ファイルの行数をカウント"""
+        """Count lines in file"""
         try:
             with open(file_path, 'r') as f:
                 return sum(1 for _ in f)
@@ -314,14 +314,14 @@ class GuideDesign:
             return 0
     
     def filter_site_specific_targets(self, bed_path, gene_type):
-        """サイト特異的な標的を抽出"""
-        self.logger.info(f"{gene_type}のサイト特異的標的を抽出中...")
+        """Extract site-specific targets"""
+        self.logger.info(f"Extracting site-specific targets for {gene_type}...")
         
         # 出力ファイルパス
         specific_path = os.path.join(self.intermediate_dir, f'{gene_type}_targets_specific.bed')
         cleaned_path = os.path.join(self.intermediate_dir, f'{gene_type}_targets_specific_clean.bed')
         
-        # サイト特異的な標的を抽出（4列目が/1/パターン）
+        # Extract site-specific targets（4列目が/1/パターン）
         with open(bed_path, 'r') as f_in:
             with open(specific_path, 'w') as f_out:
                 for line in f_in:
@@ -342,19 +342,19 @@ class GuideDesign:
         
         # 統計情報をログ出力
         specific_count = self._count_lines(cleaned_path)
-        self.logger.info(f"{gene_type}のサイト特異的標的数: {specific_count}")
+        self.logger.info(f"Number of site-specific targets for {gene_type}: {specific_count}")
         
         return cleaned_path
     
     def merge_with_annotation(self, targets_path, gene_type):
-        """ガイド標的情報をアノテーションと結合"""
-        self.logger.info(f"{gene_type}のガイド標的情報をアノテーションと結合中...")
+        """Merge guide target information with annotation"""
+        self.logger.info(f"{gene_type}のMerge guide target information with annotation中...")
         
         # アノテーション分類ファイル
         annotation_path = os.path.join(self.intermediate_dir, 'annotation_classified.txt')
         
         if not os.path.exists(annotation_path):
-            self.logger.warning("アノテーション分類ファイルが見つかりません")
+            self.logger.warning("Annotation classification file not found.")
             return None
         
         # 出力ファイルパス
@@ -403,12 +403,12 @@ class GuideDesign:
                             
                             f_out.write(f"{line.strip()}\t{guide_targets_str}\n")
         
-        self.logger.info(f"{gene_type}のアノテーション-ガイド結合結果を保存: {output_path}")
+        self.logger.info(f"Save the annotation-guide binding results for {gene_type}.: {output_path}")
         return output_path
     
     def create_final_combined_table(self, multi_path, single_path):
-        """最終的な結合テーブルを作成"""
-        self.logger.info("最終的な結合テーブルを作成中...")
+        """Create final combined table"""
+        self.logger.info("Create final combined table中...")
         
         output_path = os.path.join(self.intermediate_dir, 'annotation_with_guides_final.tsv')
         
@@ -438,7 +438,7 @@ class GuideDesign:
                     for line in f_in:
                         f_out.write(line)
         
-        self.logger.info(f"最終的な結合テーブルを保存: {output_path}")
+        self.logger.info(f"Save the final joined table: {output_path}")
         return output_path
     
     def run(self):
@@ -447,7 +447,7 @@ class GuideDesign:
             # ゲノムアセンブリの準備
             genome_path = self.prepare_genome_assembly()
             
-            # 遺伝子配列ファイルの準備
+            # Prepare gene sequence files
             gene_files = self.prepare_gene_sequences()
             
             results = {
@@ -484,23 +484,23 @@ class GuideDesign:
             # 結果をファイルに保存
             results_file = os.path.join(self.intermediate_dir, 'guide_design_results.txt')
             with open(results_file, 'w', encoding='utf-8') as f:
-                f.write("=== CRISPRガイド設計結果 ===\n\n")
-                f.write(f"ゲノムアセンブリ: {genome_path}\n")
-                f.write(f"遺伝子ファイル: {gene_files}\n\n")
+                f.write("=== CRISPR guided design results ===\n\n")
+                f.write(f"Genome assembly: {genome_path}\n")
+                f.write(f"Gene file: {gene_files}\n\n")
                 
                 for gene_type, result in results['target_results'].items():
                     f.write(f"=== {gene_type} ===\n")
-                    f.write(f"全ガイド標的: {result['all_targets']}\n")
-                    f.write(f"特異的標的: {result['specific_targets']}\n")
-                    f.write(f"アノテーション結合: {result['annotation_with_guides']}\n\n")
+                    f.write(f"All guide targets: {result['all_targets']}\n")
+                    f.write(f"Specific target: {result['specific_targets']}\n")
+                    f.write(f"Annotation related: {result['annotation_with_guides']}\n\n")
                 
-                f.write(f"最終結合テーブル: {final_table}\n")
+                f.write(f"Final Join Table: {final_table}\n")
             
-            self.logger.info(f"CRISPRガイド設計結果を保存: {results_file}")
-            self.logger.info("CRISPRガイド設計処理が完了しました")
+            self.logger.info(f"Save CRISPR guided design results: {results_file}")
+            self.logger.info("The CRISPR guided design process has been completed.")
             
             return results
             
         except Exception as e:
-            self.logger.error(f"CRISPRガイド設計処理でエラーが発生しました: {e}")
+            self.logger.error(f"An error occurred during the CRISPR guided design process.: {e}")
             raise

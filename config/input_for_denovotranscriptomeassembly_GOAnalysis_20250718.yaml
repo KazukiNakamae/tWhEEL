@@ -4,7 +4,7 @@
 input:
   genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa) 
   transcriptome: "./LOCAL_DATA/20250718_Entoria_okinawaensis/ICSG01.1.fsa_nt"    # トランスクリプトームファイル (.fsa_nt or .fa)
-  uniprot_db: "./LOCAL_DATA/db/uniprot_sprot.fasta"       # タンパクデータベースファイル (.fasta)
+  protein_db_for_goanalysis: "./LOCAL_DATA/db/uniprot_sprot.fasta"       # GO解析用タンパク質データベースファイル (.fasta)
 
 # 出力ディレクトリ設定
 output:

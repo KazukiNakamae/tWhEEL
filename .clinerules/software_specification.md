@@ -359,21 +359,120 @@ Protein sequences (query.pep)
         ├─→ [Annotation]
         │        ↓
         │   Gene classifications
-        │        ├─→ [GuideDesign]
-        │        │        ↓
-        │        │   Guide RNAs
-        │        │        ├─→ [GOAnalysis]
-        │        │        │        ↓
-        │        │        │   GO-KFI scores
-        │        │        │
-        │        └────────┴─→ [PathwayAnalysis]
-        │                        ↓
-        │                   PW-KFI scores
-        │
-        └────────────────────────┬─→ [Report Generation]
-                                 ↓
-                    HTML, CSV, JSON, SQLite
+        │        └─→ [GuideDesign]
+        │              ↓
+        │         Guide RNAs (annotation with guides)
+        │              │
+        │    ┌─────────┴─────────┐
+        │    │ (Two parallel paths: GO OR Pathway analysis)
+        │    │
+        │    ├─→ [GOAnalysis]    └─→ [PathwayAnalysis]
+        │         ↓                    ↓
+        │    GO-KFI scores        PW-KFI scores
+        │         ↓                    ↓
+        │  [Report Generation]  [Pathway Report Generation]
+        │         ↓                    ↓
+        │   HTML Dashboard      Pathway HTML Reports
+        │         ↓                    ↓
+        └─────────┬────────────────────┘
+                  ↓
+     Combined Output (HTML, CSV, JSON, SQLite)
 ```
+
+**Key Points:**
+- GO Analysis and Pathway Analysis are independent parallel processes
+- Each requires separate YAML configuration files
+- ReportGenerator handles GO-KFI based reports
+- PathwayReportGenerator handles Pathway-KFI based reports
+- Both can run independently or together
+
+### Pipeline Processing Flow Details
+
+#### Stage 1: Common Pre-analysis Steps
+1. **GenePrediction**
+   - Input: Transcriptome FASTA file
+   - Process: TransDecoder-based ORF prediction (default) or provided protein sequences (existing protein mode)
+   - Output: Predicted protein sequences (query.pep)
+   - Note: TransDecoder can be skipped if protein sequences are provided via config
+
+2. **Annotation**
+   - Input: Protein sequences from GenePrediction
+   - Process: FASTA-based similarity search against Protein Database
+   - Output: Annotated gene sequences with classifications (Single/Multi)
+   - Database dependency: Protein DB for subsequent analysis type
+
+3. **GuideDesign**
+   - Input: Annotated gene sequences
+   - Process: CRISPR guide RNA design using CRISPRFlash
+   - Output: Guide RNA sequences with specificity scoring
+   - Off-target search methods:
+     - Transcriptome assembly-based (default)
+     - Genome assembly-based (recommended): Provides more comprehensive off-target analysis
+   - Note: Genome assembly automatically used when provided in config
+
+#### Stage 2: Parallel Analysis Paths (Choose One or Both)
+
+**Path A: GO-KFI Analysis**
+1. GOAnalysis processes annotated sequences with Protein DB for GO Analysis
+2. Calculates GO-KFI scores for Gene Ontology terms
+3. ReportGenerator creates GO-based HTML dashboard
+4. Output: Interactive HTML report with GO term visualization
+
+**Path B: Pathway-KFI Analysis**
+1. PathwayAnalysis processes annotated sequences with Protein DB for Pathway Analysis
+2. Calculates PW-KFI scores for pathway components
+3. PathwayReportGenerator creates pathway-specific HTML reports
+4. Output: Pathway diagrams with color-coded guide availability
+
+#### Annotation Database Configuration
+
+The Annotation process requires different Protein Database references depending on the analysis path:
+
+- **GO Analysis Path**: Uses `protein_db_for_goanalysis`
+  - Database can be any organism-relevant protein database (e.g., UniProt)
+  - Provides annotations for Gene Ontology term mapping
+  
+- **Pathway Analysis Path**: Uses `sgd_db`
+  - Database should contain genes present in target pathway databases
+  - Currently optimized for Saccharomyces cerevisiae (SGD)
+  - Future versions will support additional organisms
+
+**Important**: Select appropriate protein database for your analysis type and organism.
+
+#### Gene Prediction Flexibility
+
+GenePrediction module supports two operational modes:
+
+1. **TransDecoder Mode (Default)**
+   - Performs de novo ORF prediction from transcriptome
+   - Recommended for novel transcriptomes without existing annotations
+   - Configuration: Leave `protein_sequences` empty or undefined
+
+2. **Existing Protein Mode**
+   - Skips TransDecoder; uses provided protein sequences
+   - Requires: `protein_sequences` file path and `protein_transcript_mapping` file
+   - Mapping file: Tab-separated (TSV) format linking transcript IDs to protein IDs
+   - Useful when working with previously predicted or known protein sequences
+   - Configuration: Specify both `protein_sequences` and `protein_transcript_mapping`
+
+#### Guide Design Off-Target Search Methods
+
+GuideDesign module provides flexible off-target analysis strategies:
+
+1. **Transcriptome Assembly-Based (Default)**
+   - Off-target search limited to transcriptome sequences
+   - Lower computational cost
+   - Suitable when genome assembly unavailable
+   - Configuration: `genome_assembly` not specified
+
+2. **Genome Assembly-Based (Recommended)**
+   - Comprehensive off-target search across entire genome
+   - Identifies off-target sites in non-transcribed regions
+   - Provides more reliable specificity assessment
+   - Higher computational cost (multi-gigabyte genome indexing)
+   - Configuration: Specify `genome_assembly` file path
+   - Automatically used when genome assembly provided
+   - Recommended for CRISPR experiments requiring high specificity
 
 ### Database Schema
 

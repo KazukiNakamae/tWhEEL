@@ -12,8 +12,8 @@ input:
   # タンパク質ID→トランスクリプトIDマッピングファイル
   protein_transcript_mapping: "LOCAL_DATA/20250831_Danio_rerio_GRCz12tu/GCF_049306965.1_GRCz12tu_genomic.gff.tx2protein.tsv"  # タブ区切り形式: protein_id<TAB>transcript_id
 
-  # UniProtデータベース
-  uniprot_db: "./LOCAL_DATA/db/uniprot_sprot.fasta"
+  # GO解析用タンパク質データベース
+  protein_db_for_goanalysis: "./LOCAL_DATA/db/uniprot_sprot.fasta"
   
   # ゲノムアセンブリ
   genome_assembly: "./LOCAL_DATA/20250831_Danio_rerio_GRCz12tu/GCF_049306965.1_GRCz12tu_genomic.fa"

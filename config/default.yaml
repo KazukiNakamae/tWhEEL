@@ -6,7 +6,7 @@ input:
   protein_sequences: ""  # 既存のアミノ酸配列ファイル (.fasta/.fa/.pep)
   protein_transcript_mapping: ""  # タンパク質ID→トランスクリプトIDマッピングファイル (.tsv) 
   genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa)
-  uniprot_db: ""       # タンパクデータベースファイル (.fasta)
+  protein_db_for_goanalysis: ""       # GO解析用タンパク質データベースファイル (.fasta)
 
 # 出力ディレクトリ設定
 output:

@@ -514,7 +514,7 @@ class ReportGenerator:
             f.write(f"Input files:\n")
             f.write(f"  - Genome assembly: {results['config']['input'].get('genome_assembly', 'N/A')}\n")
             f.write(f"  - Transcriptome: {results['config']['input'].get('transcriptome', 'N/A')}\n")
-            f.write(f"  - UniProt database: {results['config']['input'].get('uniprot_db', 'N/A')}\n")
+            f.write(f"  - Protein Database for GO Analysis: {results['config']['input'].get('protein_db_for_goanalysis', 'N/A')}\n")
             f.write(f"PAM pattern: {results['config']['crispr'].get('pam_pattern', 'N/A')}\n")
             f.write(f"Max mismatch: {results['config']['crispr'].get('max_mismatch', 'N/A')}\n")
             f.write(f"BUSCO lineage: {results['config']['busco'].get('lineage', 'N/A')}\n")
@@ -561,7 +561,7 @@ class ReportGenerator:
                 return False
             
             conn.close()
-            self.logger.info(f"既存の有効なデータベースを検出しました: {db_path}")
+            self.logger.info(f"An existing valid database was detected.: {db_path}")
             return True
             
         except sqlite3.Error as e:
@@ -582,7 +582,7 @@ class ReportGenerator:
                 self.logger.warning(f"Missing tables: {missing_tables}")
                 return False
             
-            self.logger.info("データベーステーブル構造を確認しました。")
+            self.logger.info("Checked the database table structure.")
             return True
             
         except sqlite3.Error as e:
@@ -600,7 +600,7 @@ class ReportGenerator:
                 self.logger.warning("Database tables exist but genes table is empty.")
                 return False
             
-            self.logger.info(f"データベースに {gene_count} 件の遺伝子データが存在します。")
+            self.logger.info(f"The database contains {gene_count} gene data entries.")
             return True
             
         except sqlite3.Error as e:
@@ -621,12 +621,12 @@ class ReportGenerator:
         force_rebuild = self.config.get('database', {}).get('force_rebuild', False)
         
         if not force_rebuild and self._check_database_exists(db_path):
-            self.logger.info("既存のデータベースを使用します。データベース作成をスキップします。")
+            self.logger.info("Use an existing database. Skip database creation.")
         else:
             if force_rebuild:
-                self.logger.info("強制再生成フラグが設定されています。データベースを新規作成します。")
+                self.logger.info("The forced regeneration flag is set. A new database will be created.")
             else:
-                self.logger.info("データベースが存在しないか無効です。新規作成します。")
+                self.logger.info("The database does not exist or is invalid. A new one will be created.")
             
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
@@ -642,7 +642,7 @@ class ReportGenerator:
             conn.commit()
             conn.close()
             
-            self.logger.info(f"データベース作成完了: {db_path}")
+            self.logger.info(f"Database creation complete.: {db_path}")
         
         # Save basic statistics in JSON format
         json_data = {
@@ -978,9 +978,7 @@ class ReportGenerator:
                         
                         go_genes_map[go_id] = gene_names
                     
-                    # Process only first 10000 lines to avoid memory issues
-                    if line_num > 10000:
-                        break
+                    # Note: No line limit - read all GO terms to populate annotated_genes_full
             
             self.logger.info(f"Parsed GO-annotated genes for {len(go_genes_map)} GO terms")
             
@@ -3599,6 +3597,15 @@ class tWhEELReport {
         return num.toFixed(decimals) + '%';
     }
     
+    // CSV field escape helper (RFC 4180 compliant)
+    escapeCSVField(value) {
+        if (value === null || value === undefined) return '""';
+        const str = String(value);
+        // Escape embedded double quotes as "" and normalize line breaks to spaces
+        const escaped = str.replace(/"/g, '""').replace(/\\n/g, ' ').replace(/\\r/g, ' ');
+        return '"' + escaped + '"';
+    }
+
     // Guide RNA CSV download functionality
     async downloadGOGuideRNAs(goId, goName) {
         console.log('Downloading Guide RNAs for GO:', goId, goName);
@@ -3750,11 +3757,12 @@ class tWhEELReport {
             ];
             
             // Create CSV rows
+            // Use escapeCSVField to properly handle commas, double quotes, and newlines in text fields
             const rows = this.filteredGeneData.map(gene => [
                 gene.query_id,
                 gene.subject_id,
-                `"${gene.gene_name}"`, // Quote to handle commas
-                `"${gene.description}"`, // Quote to handle commas
+                this.escapeCSVField(gene.gene_name),
+                this.escapeCSVField(gene.description),
                 gene.classification,
                 gene.unique_id,
                 gene.target_count
@@ -3838,7 +3846,7 @@ class tWhEELReport {
                 return;
             }
             
-            // CSV header
+            // CSV header (fixed 7 columns + GO_annotated_Gene_Groups as start of variable columns)
             const headers = [
                 'GO_ID',
                 'GO_Term',
@@ -3851,18 +3859,33 @@ class tWhEELReport {
             ];
             
             // Create CSV rows
-            const rows = this.filteredGOData.map(go => [
-                go.go_id,
-                `"${go.go_name}"`, // Quote to handle commas
-                `"${go.go_definition}"`, // Quote to handle commas  
-                go.total_genes,
-                go.genes_with_guides,
-                go.kfi_score.toFixed(4),
-                go.targetable_type,
-                `"${go.annotated_genes_full || go.annotated_genes}"` // Quote to handle commas
-            ]);
+            // Each gene group ID gets its own cell starting from GO_annotated_Gene_Groups column.
+            // Rows have variable number of columns depending on the number of gene groups.
+            // Each individual gene group ID is short (~20 chars), avoiding cell size overflow.
+            const rows = this.filteredGOData.map(go => {
+                // Base fields (7 columns before gene groups)
+                const baseFields = [
+                    go.go_id,
+                    this.escapeCSVField(go.go_name),
+                    this.escapeCSVField(go.go_definition),
+                    go.total_genes,
+                    go.genes_with_guides,
+                    go.kfi_score.toFixed(4),
+                    go.targetable_type
+                ];
+                
+                // Split annotated_genes_full into individual gene group IDs
+                // annotated_genes_full format: "Multi_0000000001, Multi_0000000011, ..."
+                const genesValue = go.annotated_genes_full || '';
+                const geneGroups = genesValue
+                    ? genesValue.split(', ').map(g => g.trim()).filter(g => g.length > 0)
+                    : [];
+                
+                // Each gene group ID goes in its own cell (no quoting needed, IDs contain no special chars)
+                return [...baseFields, ...geneGroups];
+            });
             
-            // Combine header and rows
+            // Combine header and rows (rows have variable column counts)
             const csvLines = [headers.join(',')].concat(rows.map(row => row.join(',')));
             const csvContent = csvLines.join('\\n');
             
@@ -4445,7 +4468,7 @@ if (typeof module !== 'undefined' && module.exports) {
                                 <ul style="text-align: left; font-size: 0.85rem;">
                                     <li><strong>Genome Assembly:</strong><br>{results['config']['input'].get('genome_assembly', 'N/A')}</li>
                                     <li><strong>Transcriptome:</strong><br>{results['config']['input'].get('transcriptome', 'N/A')}</li>
-                                    <li><strong>UniProt Database:</strong><br>{results['config']['input'].get('uniprot_db', 'N/A')}</li>
+                                    <li><strong>Protein Database for GO Analysis:</strong><br>{results['config']['input'].get('protein_db_for_goanalysis', 'N/A')}</li>
                                 </ul>
                             </div>
                             
@@ -4806,7 +4829,7 @@ body {{
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
                             <li><strong>Genome Assembly:</strong><br>{results['config']['input'].get('genome_assembly', 'N/A')}</li>
                             <li><strong>Transcriptome:</strong><br>{results['config']['input'].get('transcriptome', 'N/A')}</li>
-                            <li><strong>UniProt Database:</strong><br>{results['config']['input'].get('uniprot_db', 'N/A')}</li>
+                            <li><strong>Protein Database for GO Analysis:</strong><br>{results['config']['input'].get('protein_db_for_goanalysis', 'N/A')}</li>
                         </ul>
                     </div>
                     

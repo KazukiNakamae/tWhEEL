@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 
-# モジュールのインポート
+# Module imports
 from modules.gene_prediction import GenePrediction
 from modules.annotation import Annotation
 from modules.sgd_annotation import Sgd_annotation
@@ -129,14 +129,53 @@ class tWhEELPipeline:
             self.logger.error(f"Transcriptome file not found: {transcriptome}")
             return False
         
-        # UniProt database is always required
-        uniprot_db = self.config['input']['uniprot_db']
-        if not uniprot_db:
-            self.logger.error("Required parameter not set: uniprot_db")
-            return False
-        if not os.path.exists(uniprot_db):
-            self.logger.error(f"UniProt database file not found: {uniprot_db}")
-            return False
+        # Check if any steps requiring protein_db_for_goanalysis are planned to run
+        steps = self.config['execution'].get('steps', [])
+        requires_protein_db = any(step in steps for step in ['annotation', 'go_analysis', 'report_generation'])
+        
+        # Protein database for GO analysis is conditionally required
+        protein_db_for_goanalysis = self.config['input'].get('protein_db_for_goanalysis', '')
+        if requires_protein_db:
+            if not protein_db_for_goanalysis:
+                self.logger.error("Required parameter not set: protein_db_for_goanalysis")
+                self.logger.error("protein_db_for_goanalysis is required for steps: annotation, go_analysis, report_generation")
+                return False
+            if not os.path.exists(protein_db_for_goanalysis):
+                self.logger.error(f"Protein database file not found: {protein_db_for_goanalysis}")
+                return False
+        else:
+            if protein_db_for_goanalysis:
+                self.logger.info(f"protein_db_for_goanalysis specified but not used in current pipeline steps")
+            else:
+                self.logger.info("protein_db_for_goanalysis not required for current pipeline steps (pathway analysis only)")
+        
+        # sgd_annotation step: validate sgd_db (S. cerevisiae-specific)
+        # Each organism-specific annotation step validates its own database here.
+        # Future organism support (e.g., wormbase_annotation) should add a similar block below.
+        if 'sgd_annotation' in steps:
+            sgd_db = self.config['input'].get('sgd_db', '')
+            if not sgd_db:
+                self.logger.error("Required parameter not set: sgd_db")
+                self.logger.error("sgd_db is required for sgd_annotation step (S. cerevisiae pathway analysis)")
+                return False
+            if not os.path.exists(sgd_db):
+                self.logger.error(f"SGD database file not found: {sgd_db}")
+                return False
+            self.logger.info(f"SGD database validated: {sgd_db}")
+        
+        # pathway_analysis / pathway_report_generation steps: validate WikiPathways GPML directory
+        pathway_steps_present = any(step in steps for step in ['pathway_analysis', 'pathway_report_generation'])
+        if pathway_steps_present:
+            pathway_config = self.config.get('pathway_analysis', {})
+            gpml_dir = pathway_config.get('wikipathways_gpml_dir', '')
+            if not gpml_dir:
+                self.logger.error("Required parameter not set: pathway_analysis.wikipathways_gpml_dir")
+                self.logger.error("wikipathways_gpml_dir is required for pathway_analysis and pathway_report_generation steps")
+                return False
+            if not os.path.exists(gpml_dir):
+                self.logger.error(f"WikiPathways GPML directory not found: {gpml_dir}")
+                return False
+            self.logger.info(f"WikiPathways GPML directory validated: {gpml_dir}")
         
         # Check processing mode: existing protein sequences (optional) + transcriptome (required)
         protein_sequences = self.config['input'].get('protein_sequences', '')
