@@ -14,6 +14,12 @@ import shutil
 
 from .fasta_search_cache import FastaSearchCache
 from .input_mode import EXISTING_PROTEIN_MODE, determine_protein_input_mode
+from .transcript_mapping import (
+    TranscriptMappingError,
+    load_mapping_file,
+    read_fasta_sequences,
+    validate_mapping_against_fastas,
+)
 
 
 class Sgd_annotation:
@@ -61,31 +67,36 @@ class Sgd_annotation:
             return None
         
         self.logger.info(f"Loading protein-transcript mapping file.: {mapping_path}")
-        
-        mapping_dict = {}
-        try:
-            with open(mapping_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line or line.startswith('#'):  # 空行やコメント行をスキップ
-                        continue
-                    
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        transcript_id = parts[0].strip()
-                        protein_id = parts[1].strip()
-                        # protein_id -> transcript_id のマッピング
-                        mapping_dict[protein_id] = transcript_id
-                    else:
-                        self.logger.warning(f"Mapping file line {line_num}: Invalid format - {line}")
-            
-            self.logger.info(f"Building a mapping dictionary: {len(mapping_dict)} entries")
-            self.protein_transcript_mapping = mapping_dict
-            return mapping_dict
-            
-        except Exception as e:
-            self.logger.error(f"Mapping file loading error: {e}")
-            raise RuntimeError(f"Failed to load mapping file.: {mapping_path}")
+
+        mapping_dict = load_mapping_file(mapping_path)
+        self.logger.info(
+            f"Built the mapping dictionary: {len(mapping_dict)} entries"
+        )
+        self.protein_transcript_mapping = mapping_dict
+        return mapping_dict
+
+    def validate_protein_transcript_mapping(
+        self,
+        protein_fasta_path,
+        transcript_fasta_path,
+    ):
+        """Validate mapping coverage against the prepared pipeline FASTAs."""
+        if self.protein_transcript_mapping is None:
+            raise TranscriptMappingError(
+                "Protein-transcript mapping has not been loaded"
+            )
+
+        validation = validate_mapping_against_fastas(
+            self.protein_transcript_mapping,
+            protein_fasta_path,
+            transcript_fasta_path,
+        )
+        self.logger.info(
+            "Protein-transcript mapping validation completed: "
+            f"{validation['protein_count']} proteins, "
+            f"{validation['mapped_transcript_count']} mapped transcripts"
+        )
+        return validation
     
     def run_fasta_search(self, query_path, db_path):
         """Execute FASTA search"""
@@ -158,10 +169,14 @@ class Sgd_annotation:
         for line in lines:
             line = line.strip()
             
-            # クエリ開始行を検索: "1>>>query_id ... - xxx aa"
-            query_match = re.match(r'^\d+>>>(.+?)\s+.+?\s+-\s+\d+\s+aa', line)
+            # The FASTA description is optional, so capture only the first
+            # whitespace-delimited identifier before the final length field.
+            query_match = re.match(
+                r'^\d+>>>(?P<query_id>\S+)(?:\s+.*?)?\s+-\s+\d+\s+aa(?:\s|$)',
+                line,
+            )
             if query_match:
-                current_query = query_match.group(1).strip()
+                current_query = query_match.group('query_id')
                 processing_hits = False
                 self.logger.debug(f"Found query: {current_query}")
                 continue
@@ -379,7 +394,6 @@ class Sgd_annotation:
         
         # アノテーション結果の統計用カウンタ
         total_annotations = 0
-        excluded_count = 0
         included_count = 0
         
         # subject_idをキーとしてアノテーション結果を読み込み
@@ -387,16 +401,42 @@ class Sgd_annotation:
         
         with open(annotation_path, 'r', encoding='utf-8', newline='') as f:
             reader = csv.DictReader(f, delimiter='\t')
-            for row in reader:
-                query_id = row.get('query_id', '').strip()
-                subject_id = row.get('subject_id', '').strip()
-                description = row.get('description', '').strip()
+            source_columns = (
+                'query_id',
+                'subject_id',
+                'identity',
+                'length',
+                'evalue',
+                'bit_score',
+                'description',
+            )
+            for row_number, row in enumerate(reader, 2):
+                if (
+                    self.protein_transcript_mapping is not None
+                    and any(row.get(column) is None for column in source_columns)
+                ):
+                    raise TranscriptMappingError(
+                        "Malformed annotation row cannot be reconciled with "
+                        "the protein-transcript mapping at "
+                        f"{annotation_path}:{row_number}"
+                    )
+
+                query_id = (row.get('query_id') or '').strip()
+                subject_id = (row.get('subject_id') or '').strip()
+                description = (row.get('description') or '').strip()
                 gene_name = (
                     row.get('gene_name', '').strip()
                     or self._extract_gene_name(description)
                 )
 
                 if not query_id or not subject_id:
+                    if self.protein_transcript_mapping is not None:
+                        raise TranscriptMappingError(
+                            "Annotation row has an empty query_id or "
+                            "subject_id and cannot be reconciled with the "
+                            "protein-transcript mapping at "
+                            f"{annotation_path}:{row_number}"
+                        )
                     self.logger.warning(
                         "Skipping annotation row without query_id or subject_id."
                     )
@@ -418,11 +458,7 @@ class Sgd_annotation:
                         sgd_id = subject_id[len('SGDID:'):]
 
                 line_data = '\t'.join(
-                    row.get(column, '')
-                    for column in (
-                        'query_id', 'subject_id', 'identity', 'length', 'evalue',
-                        'bit_score', 'description',
-                    )
+                    row.get(column) or '' for column in source_columns
                 )
                     
                 total_annotations += 1
@@ -430,10 +466,13 @@ class Sgd_annotation:
                 # existing protein modeでマッピングファイルが読み込まれている場合のフィルタリング
                 if self.protein_transcript_mapping is not None:
                     if query_id not in self.protein_transcript_mapping:
-                        # マッピングファイルに存在しないIDは除外
-                        excluded_count += 1
-                        self.logger.debug(f"Excluded IDs (not registered in the mapping file): {query_id}")
-                        continue
+                        raise TranscriptMappingError(
+                            "Annotation query ID is absent from the "
+                            "validated protein-transcript mapping: "
+                            f"{query_id!r}. Refusing to classify this "
+                            "entry as untargetable. Rerun annotation "
+                            "with matching query and mapping inputs."
+                        )
                     
                 # 解析対象として処理
                 included_count += 1
@@ -496,16 +535,9 @@ class Sgd_annotation:
         
         # フィルタリング結果と統計情報のログ出力
         if self.protein_transcript_mapping is not None:
-            self.logger.info(f"=== Mapping-based filtering results ===")
+            self.logger.info("=== Mapping-validated annotation results ===")
             self.logger.info(f"Total number of annotations: {total_annotations}")
             self.logger.info(f"Number of subjects analyzed: {included_count}")
-            self.logger.info(f"Number of exclusions: {excluded_count}")
-            if total_annotations > 0:
-                inclusion_rate = (included_count / total_annotations) * 100
-                self.logger.info(f"Analysis rate: {inclusion_rate:.2f}%")
-            
-            if excluded_count > 0:
-                self.logger.warning(f"{excluded_count} IDs were excluded because they do not exist in the mapping file.")
         else:
             self.logger.info(f"TransDecoder mode: All {total_annotations} annotations will be analyzed.")
         
@@ -558,14 +590,30 @@ class Sgd_annotation:
         
         # 元のトランスクリプトームファイルから配列を抽出
         transcriptome_path = os.path.join(self.intermediate_dir, 'transcriptome.fa')
-        
+        transcript_sequences = self._load_transcript_sequences(
+            transcriptome_path
+        )
+
+        # Validate every Single and Multi member before creating any artifact.
+        self._resolve_required_sequences(multi_genes, transcript_sequences)
+        self._resolve_required_sequences(single_genes, transcript_sequences)
+
         # Multi遺伝子の配列抽出と個別ファイル作成
         if multi_genes:
             multi_seq_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
-            self._extract_sequences_by_ids(transcriptome_path, multi_seq_path, multi_genes)
+            self._extract_sequences_by_ids(
+                transcriptome_path,
+                multi_seq_path,
+                multi_genes,
+                sequences=transcript_sequences,
+            )
             
             # Split multi genes into individual files
-            self._create_individual_multi_gene_files(transcriptome_path, multi_genes)
+            self._create_individual_multi_gene_files(
+                transcriptome_path,
+                multi_genes,
+                sequences=transcript_sequences,
+            )
             
             # Execute alignment process
             self._run_alignment_process(multi_genes)
@@ -573,7 +621,12 @@ class Sgd_annotation:
         # Single遺伝子の配列抽出
         if single_genes:
             single_seq_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
-            self._extract_sequences_by_ids(transcriptome_path, single_seq_path, single_genes)
+            self._extract_sequences_by_ids(
+                transcriptome_path,
+                single_seq_path,
+                single_genes,
+                sequences=transcript_sequences,
+            )
         
         self.logger.info("Gene sequence extraction is complete.")
         
@@ -582,48 +635,81 @@ class Sgd_annotation:
             'single_genes': single_genes
         }
     
-    def _extract_sequences_by_ids(self, fasta_path, output_path, gene_dict):
+    @staticmethod
+    def _load_transcript_sequences(fasta_path):
+        """Load transcript sequences keyed by the first FASTA header token."""
+        return read_fasta_sequences(fasta_path, 'transcript')
+
+    def _extract_sequences_by_ids(
+        self,
+        fasta_path,
+        output_path,
+        gene_dict,
+        sequences=None,
+    ):
         """Extract sequences for specified IDs"""
-        # 全配列を読み込み
-        sequences = {}
-        
-        with open(fasta_path, 'r') as f:
-            current_id = None
-            current_seq = ""
-            
-            for line in f:
-                line = line.strip()
-                if line.startswith('>'):
-                    if current_id and current_seq:
-                        sequences[current_id] = current_seq
-                    current_id = line[1:].split()[0]  # 最初の部分のみを取得
-                    current_seq = ""
-                else:
-                    current_seq += line
-            
-            # 最後の配列を処理
-            if current_id and current_seq:
-                sequences[current_id] = current_seq
-        
-        # 指定されたIDの配列を出力
+        if sequences is None:
+            sequences = self._load_transcript_sequences(fasta_path)
+
+        resolved_sequences = self._resolve_required_sequences(
+            gene_dict, sequences
+        )
+
+        # Output only after every classified query resolves.
         with open(output_path, 'w') as f:
             for unique_id, query_ids in gene_dict.items():
                 if isinstance(query_ids, list):
                     # Multi遺伝子の場合
-                    for query_id in query_ids:
-                        sequence_id = self._resolve_sequence_id(query_id)
-                        if sequence_id and sequence_id in sequences:
-                            f.write(f">{unique_id}_{query_id}\n{sequences[sequence_id]}\n")
-                        else:
-                            self.logger.warning(f"Sequence not found (Multi): {query_id} -> {sequence_id}")
+                    for query_id, sequence_id in resolved_sequences[unique_id]:
+                        f.write(
+                            f">{unique_id}_{query_id}\n"
+                            f"{sequences[sequence_id]}\n"
+                        )
                 else:
                     # Single遺伝子の場合
-                    query_id = query_ids
-                    sequence_id = self._resolve_sequence_id(query_id)
-                    if sequence_id and sequence_id in sequences:
-                        f.write(f">{unique_id}\n{sequences[sequence_id]}\n")
-                    else:
-                        self.logger.warning(f"Sequence not found (Single): {query_id} -> {sequence_id}")
+                    _, sequence_id = resolved_sequences[unique_id][0]
+                    f.write(f">{unique_id}\n{sequences[sequence_id]}\n")
+
+    def _resolve_required_sequences(self, gene_dict, sequences):
+        """Resolve every classified query before publishing sequence FASTAs."""
+        resolved = {}
+        missing = []
+
+        for unique_id, query_ids in gene_dict.items():
+            query_id_list = (
+                query_ids if isinstance(query_ids, list) else [query_ids]
+            )
+            resolved[unique_id] = []
+            for query_id in query_id_list:
+                sequence_id = self._resolve_sequence_id(query_id)
+                if sequence_id not in sequences:
+                    missing.append(f"{query_id}->{sequence_id}")
+                    continue
+                resolved[unique_id].append((query_id, sequence_id))
+
+        if missing:
+            examples = ', '.join(missing[:5])
+            if len(missing) > 5:
+                examples += f", ... (+{len(missing) - 5})"
+            if self.protein_transcript_mapping is not None:
+                corrective_action = (
+                    "correct the protein-transcript mapping and rerun "
+                    "annotation"
+                )
+            else:
+                corrective_action = (
+                    "verify that query.pep uses TransDecoder-style "
+                    "<transcript_id>.p<number> identifiers matching "
+                    "transcriptome.fa, then rerun gene prediction and annotation"
+                )
+            raise TranscriptMappingError(
+                "Classified protein query ID(s) could not be resolved to "
+                "transcriptome FASTA records: "
+                f"{examples}. Refusing to create incomplete gene FASTAs; "
+                f"{corrective_action}."
+            )
+
+        return resolved
     
     def _resolve_sequence_id(self, query_id):
         """
@@ -639,18 +725,20 @@ class Sgd_annotation:
             str: 実際にFASTAファイル内で使用されるID、またはNone
         """
         # マッピングファイルが読み込まれている場合
-        if self.protein_transcript_mapping:
+        if self.protein_transcript_mapping is not None:
             # protein_id -> transcript_id マッピングを試行
             if query_id in self.protein_transcript_mapping:
                 transcript_id = self.protein_transcript_mapping[query_id]
                 self.logger.debug(f"Apply mapping: {query_id} -> {transcript_id}")
                 return transcript_id
-            else:
-                self.logger.debug(f"No mapping found: {query_id}")
+            raise TranscriptMappingError(
+                "Protein query ID is absent from the loaded "
+                f"protein-transcript mapping: {query_id!r}"
+            )
         
         # マッピングがない場合の従来の処理
         # query_idから .p1 などを除去してトランスクリプトIDとして使用
-        base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
+        base_id = re.sub(r'\.p\d+$', '', query_id)
         self.logger.debug(f"Conventional processing: {query_id} -> {base_id}")
         return base_id
     
@@ -670,50 +758,29 @@ class Sgd_annotation:
             
             if not mapping_path or not mapping_path.strip():
                 raise ValueError(
-                    "In existing protein mode, the protein_transcript_mapping parameter is required."
-                    "Please specify the protein ID → transcript ID mapping file."
+                    "In existing protein mode, input.protein_transcript_mapping "
+                    "is required. Specify a headerless "
+                    "transcript_id<TAB>protein_id mapping file."
                 )
             
             if not os.path.exists(mapping_path):
                 raise FileNotFoundError(
-                    f"The specified mapping file could not be found.: {mapping_path}\n"
-                    f"existing protein modeではprotein_transcript_mapping file is required."
+                    f"The specified mapping file was not found: {mapping_path}\n"
+                    "Existing protein mode requires a readable "
+                    "input.protein_transcript_mapping file."
                 )
-            
-            # ファイル形式の基本的な確認
-            try:
-                with open(mapping_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()[:10]  # 最初の10行をチェック
-                    
-                valid_lines = 0
-                for line_num, line in enumerate(lines, 1):
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        valid_lines += 1
-                    else:
-                        self.logger.warning(f"Mapping file line {line_num}: may not be in TSV format - {line}")
-                
-                if valid_lines == 0:
-                    raise ValueError(
-                        f"No valid data was found in the mapping file.: {mapping_path}\n"
-                        f"Please ensure the file format is tab-delimited (TSV)."
-                    )
-                
-                self.logger.info(f"Mapping file format verification complete.: {valid_lines} Detect valid rows")
-                    
-            except Exception as e:
-                raise RuntimeError(f"Failed to load/validate mapping file.: {mapping_path}\nError: {e}")
             
         else:
             self.logger.info("Use TransDecoder mode (no mapping file required).")
 
         return input_mode
     
-    def _create_individual_multi_gene_files(self, transcriptome_path, multi_genes):
+    def _create_individual_multi_gene_files(
+        self,
+        transcriptome_path,
+        multi_genes,
+        sequences=None,
+    ):
         """Split multi genes into individual files"""
         self.logger.info("Split multi genes into individual files中...")
         
@@ -721,37 +788,23 @@ class Sgd_annotation:
         multi_genes_dir = os.path.join(self.intermediate_dir, 'multi_genes')
         Path(multi_genes_dir).mkdir(parents=True, exist_ok=True)
         
-        # 全配列を読み込み
-        sequences = {}
-        with open(transcriptome_path, 'r') as f:
-            current_id = None
-            current_seq = ""
-            
-            for line in f:
-                line = line.strip()
-                if line.startswith('>'):
-                    if current_id and current_seq:
-                        sequences[current_id] = current_seq
-                    current_id = line[1:].split()[0]  # 最初の部分のみを取得
-                    current_seq = ""
-                else:
-                    current_seq += line
-            
-            # 最後の配列を処理
-            if current_id and current_seq:
-                sequences[current_id] = current_seq
-        
+        if sequences is None:
+            sequences = self._load_transcript_sequences(transcriptome_path)
+
+        resolved_sequences = self._resolve_required_sequences(
+            multi_genes, sequences
+        )
+
         # Multi遺伝子ごとに個別ファイルを作成
         for unique_id, query_ids in multi_genes.items():
             output_file = os.path.join(multi_genes_dir, f"{unique_id}.fa")
             
             with open(output_file, 'w') as f:
-                for query_id in query_ids:
-                    sequence_id = self._resolve_sequence_id(query_id)
-                    if sequence_id and sequence_id in sequences:
-                        f.write(f">{unique_id}_{query_id}\n{sequences[sequence_id]}\n")
-                    else:
-                        self.logger.warning(f"Sequence is not detected (Multi individual): {query_id} -> {sequence_id}")
+                for query_id, sequence_id in resolved_sequences[unique_id]:
+                    f.write(
+                        f">{unique_id}_{query_id}\n"
+                        f"{sequences[sequence_id]}\n"
+                    )
             
             self.logger.debug(f"Create individual files for multiple genes.: {output_file}")
         
@@ -855,10 +908,21 @@ class Sgd_annotation:
                 raise FileNotFoundError(f"Predicted protein sequence file not found.: {query_path}")
             
             # 入力検証: existing protein modeでのマッピングファイル要件チェック
-            self._validate_existing_protein_mode_requirements()
-            
-            # タンパク質-トランスクリプトマッピングファイルの読み込み
-            self.load_protein_transcript_mapping()
+            input_mode = self._validate_existing_protein_mode_requirements()
+
+            transcriptome_path = os.path.join(
+                self.intermediate_dir, 'transcriptome.fa'
+            )
+            if input_mode == EXISTING_PROTEIN_MODE:
+                # Validate the exact staged inputs before the expensive search.
+                self.load_protein_transcript_mapping()
+                self.validate_protein_transcript_mapping(
+                    query_path,
+                    transcriptome_path,
+                )
+            else:
+                # A configured mapping belongs only to existing protein mode.
+                self.protein_transcript_mapping = None
             
             # sgdデータベースの準備
             db_path = self.prepare_sgd_db()

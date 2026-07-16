@@ -10,6 +10,8 @@ import logging
 import csv
 from pathlib import Path
 
+from .docker_workspace import DockerWorkspace
+
 
 class GOAnalysis:
     """Gene Ontology analysis processing class"""
@@ -96,17 +98,22 @@ class GOAnalysis:
     def add_go_annotations(self, input_path):
         """Adding GO annotations"""
         self.logger.info("Adding GO annotations...")
+        self.logger.info(
+            "GO annotation requires network access to the UniProt REST API: "
+            "https://rest.uniprot.org"
+        )
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'annotation_with_guides_go.tsv')
+        workspace = DockerWorkspace(self.intermediate_dir, '/DATA')
         
         # DockerでGOアノテーション追加
         cmd = [
             "docker", "run", "--rm",
-            "-v", f"{os.getcwd()}:/DATA",
+            "-v", workspace.volume_spec,
             self.config['go_analysis']['add_go_image'],
-            f"/DATA/{input_path}",
-            f"/DATA/{output_path}"
+            workspace.container_path(input_path),
+            workspace.container_path(output_path)
         ]
         
         self.logger.debug(f"GO annotation addition command: {' '.join(cmd)}")
@@ -126,15 +133,16 @@ class GOAnalysis:
         # 出力ファイルパス
         kfi_table_path = os.path.join(self.intermediate_dir, 'go_kfi_table.csv')
         kfi_stat_path = os.path.join(self.intermediate_dir, 'go_kfi_stat.csv')
+        workspace = DockerWorkspace(self.intermediate_dir, '/DATA')
         
         # DockerでGO-KFI計算
         cmd = [
             "docker", "run", "--rm",
-            "-v", f"{os.getcwd()}:/DATA",
+            "-v", workspace.volume_spec,
             self.config['go_analysis']['compute_kfi_image'],
-            "-i", f"/DATA/{input_path}",
-            "-o", f"/DATA/{kfi_table_path}",
-            "-s", f"/DATA/{kfi_stat_path}"
+            "-i", workspace.container_path(input_path),
+            "-o", workspace.container_path(kfi_table_path),
+            "-s", workspace.container_path(kfi_stat_path)
         ]
         
         self.logger.debug(f"GO-KFI calculation command: {' '.join(cmd)}")
@@ -231,17 +239,18 @@ class GOAnalysis:
             return parent_csv_path, no_data_message
         
         self.logger.info(f"Fully targetable GOs to be processed: {go_count}個")
+        workspace = DockerWorkspace(self.intermediate_dir, '/DATA')
         
         # DockerでGO親term分析
         cmd = [
             "docker", "run", "--rm",
-            "-v", f"{os.getcwd()}:/DATA",
+            "-v", workspace.volume_spec,
             self.config['go_analysis']['count_parent_image'],
-            "--go_table", f"/DATA/{fully_targetable_path}",
+            "--go_table", workspace.container_path(fully_targetable_path),
             "--go_col", "0",
             "--treemap",
-            "--out_csv", f"/DATA/{parent_csv_path}",
-            "--out_png", f"/DATA/{parent_png_path}"
+            "--out_csv", workspace.container_path(parent_csv_path),
+            "--out_png", workspace.container_path(parent_png_path)
         ]
         
         self.logger.debug(f"GO parent term analysis command: {' '.join(cmd)}")

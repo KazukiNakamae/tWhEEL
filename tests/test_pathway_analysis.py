@@ -93,6 +93,15 @@ class PathwayAnalysisIdentifierTests(unittest.TestCase):
         )
         return path
 
+    def write_distinct_sgd_cross_references(self):
+        self.sgd_path.write_text(
+            '>YAL060W|BDH1|SGDID:S000000056 NAD-dependent protein\n'
+            'MPEPTIDE\n'
+            '>YBR160W|CDC28|SGDID:S000000057 cyclin-dependent kinase\n'
+            'MPEPTIDE\n',
+            encoding='utf-8',
+        )
+
     @staticmethod
     def annotation_row(**overrides):
         row = {
@@ -268,7 +277,207 @@ class PathwayAnalysisIdentifierTests(unittest.TestCase):
         )
 
         self.assertEqual(matched, [])
-        self.assertEqual(unmatched[0]['reason'], 'conflicting_cross_reference')
+        self.assertEqual(
+            unmatched[0]['reason'],
+            'conflicting_annotation_cross_reference',
+        )
+
+    def test_quarantines_subject_with_conflicting_ensembl_cross_reference(self):
+        self.write_distinct_sgd_cross_references()
+        self.write_annotation([
+            self.annotation_row(ensembl_id='YBR160W')
+        ])
+        analysis = PathwayAnalysis(self.config)
+
+        annotation_data = analysis.load_annotation_results()
+
+        self.assertNotIn(
+            'SGDID:S000000056', annotation_data['by_subject_id']
+        )
+        self.assertNotIn(
+            'S000000056', annotation_data['by_database']['SGD']
+        )
+        self.assertNotIn(
+            'YBR160W', annotation_data['by_database']['Ensembl']
+        )
+        self.assertIn(
+            'SGDID:S000000056', annotation_data['ambiguous_subject_ids']
+        )
+
+        issues = [
+            issue for issue in analysis.annotation_identifier_issues
+            if issue['reason'] == 'conflicting_annotation_cross_reference'
+        ]
+        self.assertEqual(len(issues), 1)
+        issue = issues[0]
+        self.assertEqual(issue['database'], 'Ensembl')
+        self.assertEqual(issue['annotation_key'], 'ensembl_id')
+        self.assertEqual(issue['identifier'], 'YBR160W')
+        self.assertEqual(issue['query_id'], 'query-1')
+        self.assertEqual(issue['unique_id'], 'Single_0000000001')
+        self.assertIn(
+            'resolver_subject_id=SGDID:S000000057',
+            issue['candidate_values'],
+        )
+        self.assertIn(
+            'annotation_subject_id=SGDID:S000000056',
+            issue['candidate_values'],
+        )
+
+        matched, unmatched = analysis.match_pathway_genes_with_annotation(
+            [
+                {
+                    'database': 'SGD',
+                    'gene_id': 'S000000056',
+                    'gene_name': 'BDH1',
+                    'annotation_key': 'sgd_id',
+                },
+                {
+                    'database': 'Ensembl',
+                    'gene_id': 'YAL060W',
+                    'gene_name': 'BDH1',
+                    'annotation_key': 'ensembl_id',
+                },
+                {
+                    'database': 'Ensembl',
+                    'gene_id': 'YBR160W',
+                    'gene_name': 'CDC28',
+                    'annotation_key': 'ensembl_id',
+                },
+            ],
+            annotation_data,
+        )
+
+        self.assertEqual(matched, [])
+        self.assertEqual(len(unmatched), 3)
+        self.assertEqual(
+            {
+                (row['pathway_gene_database'], row['pathway_gene_id']):
+                row['reason']
+                for row in unmatched
+            },
+            {
+                ('SGD', 'S000000056'):
+                'conflicting_annotation_cross_reference',
+                ('Ensembl', 'YAL060W'):
+                'conflicting_annotation_cross_reference',
+                ('Ensembl', 'YBR160W'):
+                'conflicting_annotation_cross_reference',
+            },
+        )
+
+    def test_subject_fallback_rechecks_nonempty_annotation_ensembl_id(self):
+        self.write_annotation([self.annotation_row()])
+        analysis = PathwayAnalysis(self.config)
+        annotation_data = analysis.load_annotation_results()
+
+        # Simulate a stale pre-validation artifact reaching the point-of-use
+        # fallback without a direct Ensembl index entry.
+        annotation_data['by_database']['Ensembl'].pop('YAL060W')
+        annotation_data['by_subject_id'][
+            'SGDID:S000000056'
+        ]['ensembl_id'] = 'YBR160W'
+
+        matched, unmatched = analysis.match_pathway_genes_with_annotation(
+            [{
+                'database': 'Ensembl',
+                'gene_id': 'YAL060W',
+                'gene_name': 'BDH1',
+                'annotation_key': 'ensembl_id',
+            }],
+            annotation_data,
+        )
+
+        self.assertEqual(matched, [])
+        self.assertEqual(
+            unmatched[0]['reason'],
+            'conflicting_annotation_cross_reference',
+        )
+
+    def test_conflicting_ensembl_cross_reference_cannot_inflate_pw_kfi(self):
+        self.write_distinct_sgd_cross_references()
+        self.write_annotation([
+            self.annotation_row(ensembl_id='YBR160W')
+        ])
+        self.write_gpml([
+            ('SGD', 'S000000056', 'BDH1 SGD'),
+            ('Ensembl', 'YAL060W', 'BDH1 Ensembl'),
+            ('Ensembl', 'YBR160W', 'CDC28 Ensembl'),
+        ])
+        analysis = PathwayAnalysis(self.config)
+
+        results = analysis.run()
+
+        self.assertEqual(len(results['processed_pathways']), 1)
+        pathway = results['processed_pathways'][0]
+        self.assertEqual(pathway['total_genes'], 2)
+        self.assertEqual(pathway['matched_gene_count'], 0)
+        self.assertEqual(pathway['unmatched_gene_count'], 2)
+        self.assertEqual(pathway['genes_with_guides'], 0)
+        self.assertEqual(pathway['pw_kfi_score'], 0.0)
+        self.assertEqual(pathway['targetable_type'], 'Not targetable')
+        self.assertEqual(
+            {gene['reason'] for gene in pathway['unmatched_genes']},
+            {'conflicting_annotation_cross_reference'},
+        )
+
+        gene_audit_path = Path(
+            results['output_files']['gene_match_audit_path']
+        )
+        with gene_audit_path.open(
+            encoding='utf-8', newline=''
+        ) as handle:
+            gene_audit_rows = list(csv.DictReader(handle, delimiter='\t'))
+        self.assertEqual(len(gene_audit_rows), 3)
+        self.assertEqual(
+            {
+                (row['pathway_gene_database'], row['pathway_gene_id'])
+                for row in gene_audit_rows
+            },
+            {
+                ('SGD', 'S000000056'),
+                ('Ensembl', 'YAL060W'),
+                ('Ensembl', 'YBR160W'),
+            },
+        )
+        self.assertEqual(
+            {row['status'] for row in gene_audit_rows}, {'unmatched'}
+        )
+        self.assertEqual(
+            {row['reason'] for row in gene_audit_rows},
+            {'conflicting_annotation_cross_reference'},
+        )
+        self.assertEqual(
+            sum(int(row['denominator_contribution']) for row in gene_audit_rows),
+            2,
+        )
+        self.assertEqual(
+            {row['matched_annotation_id'] for row in gene_audit_rows}, {''}
+        )
+
+        identifier_audit_path = Path(
+            results['output_files']['annotation_identifier_audit_path']
+        )
+        with identifier_audit_path.open(
+            encoding='utf-8', newline=''
+        ) as handle:
+            identifier_audit_rows = list(
+                csv.DictReader(handle, delimiter='\t')
+            )
+        conflict_rows = [
+            row for row in identifier_audit_rows
+            if row['reason'] == 'conflicting_annotation_cross_reference'
+        ]
+        self.assertEqual(len(conflict_rows), 1)
+        self.assertEqual(conflict_rows[0]['identifier'], 'YBR160W')
+        self.assertIn(
+            'resolver_subject_id=SGDID:S000000057',
+            conflict_rows[0]['candidate_values'],
+        )
+        self.assertIn(
+            'annotation_subject_id=SGDID:S000000056',
+            conflict_rows[0]['candidate_values'],
+        )
 
     def test_rejects_subject_id_conflicting_with_explicit_sgd_id(self):
         self.write_annotation([

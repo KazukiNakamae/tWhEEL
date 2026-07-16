@@ -7,6 +7,41 @@ from unittest import mock
 from src.modules.go_analysis import GOAnalysis
 
 
+class GoAnnotationTests(unittest.TestCase):
+    def test_logs_uniprot_network_requirement_before_annotation(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            analysis = GOAnalysis({
+                'output': {
+                    'intermediate': temp_dir_name,
+                },
+                'go_analysis': {
+                    'add_go_image': 'add-go-columns:test',
+                },
+            })
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='',
+                stderr='',
+            )
+
+            with self.assertLogs(
+                'src.modules.go_analysis',
+                level='INFO',
+            ) as captured_logs:
+                with mock.patch(
+                    'src.modules.go_analysis.subprocess.run',
+                    return_value=completed,
+                ):
+                    analysis.add_go_annotations('input.tsv')
+
+        self.assertIn(
+            'GO annotation requires network access to the UniProt REST API: '
+            'https://rest.uniprot.org',
+            '\n'.join(captured_logs.output),
+        )
+
+
 class GoParentTermAnalysisTests(unittest.TestCase):
     @staticmethod
     def _config(intermediate_dir):

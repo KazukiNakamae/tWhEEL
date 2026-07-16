@@ -136,6 +136,96 @@ class SiteSpecificTargetTests(unittest.TestCase):
 
             self.assertEqual(set(prepared_files), {'single_genes'})
 
+    def test_declared_single_gene_without_extracted_sequence_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            (intermediate / 'annotation_classified.txt').write_text(
+                'classification\tunique_id\nSingle\tSingle_1\n',
+                encoding='utf-8',
+            )
+            (intermediate / 'single_genes.fa').touch()
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+            })
+
+            with self.assertRaisesRegex(RuntimeError, 'missing=Single_1'):
+                guide_design.prepare_gene_sequences()
+
+    def test_partial_single_gene_fasta_rejects_missing_declaration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            (intermediate / 'annotation_classified.txt').write_text(
+                'classification\tunique_id\n'
+                'Single\tSingle_1\nSingle\tSingle_2\n',
+                encoding='utf-8',
+            )
+            (intermediate / 'single_genes.fa').write_text(
+                '>Single_1\nACGT\n', encoding='utf-8'
+            )
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+            })
+
+            with self.assertRaisesRegex(RuntimeError, 'missing=Single_2'):
+                guide_design.prepare_gene_sequences()
+
+    def test_stale_single_gene_fasta_record_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            (intermediate / 'annotation_classified.txt').write_text(
+                'classification\tunique_id\nSingle\tSingle_1\n',
+                encoding='utf-8',
+            )
+            (intermediate / 'single_genes.fa').write_text(
+                '>Single_1\nACGT\n>Single_stale\nTGCA\n',
+                encoding='utf-8',
+            )
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+            })
+
+            with self.assertRaisesRegex(
+                RuntimeError, 'unexpected=Single_stale'
+            ):
+                guide_design.prepare_gene_sequences()
+
+    def test_empty_single_gene_sequence_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            (intermediate / 'annotation_classified.txt').write_text(
+                'classification\tunique_id\nSingle\tSingle_1\n',
+                encoding='utf-8',
+            )
+            (intermediate / 'single_genes.fa').write_text(
+                '>Single_1\n', encoding='utf-8'
+            )
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+            })
+
+            with self.assertRaisesRegex(RuntimeError, 'empty sequence'):
+                guide_design.prepare_gene_sequences()
+
+    def test_matching_single_gene_declarations_are_prepared(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            (intermediate / 'annotation_classified.txt').write_text(
+                'classification\tunique_id\n'
+                'Single\tSingle_1\nSingle\tSingle_2\n',
+                encoding='utf-8',
+            )
+            (intermediate / 'single_genes.fa').write_text(
+                '>Single_1\nACGT\n>Single_2\nTGCA\n',
+                encoding='utf-8',
+            )
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+            })
+
+            prepared_files = guide_design.prepare_gene_sequences()
+
+            self.assertEqual(set(prepared_files), {'single_genes'})
+
     def test_missing_optional_genome_assembly_uses_transcriptome(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

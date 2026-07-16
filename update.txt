@@ -78,7 +78,8 @@ Current limitations
 -------------------
 
 - The supplied protein FASTA and mapping TSV identifiers must agree exactly.
-- Missing protein mappings are excluded from standard annotation grouping.
+- Mapping inconsistencies stop annotation before the similarity search. They
+  are not converted into excluded or untargetable genes.
 - A configured but missing protein FASTA selects TransDecoder mode rather than
   existing protein mode.
 - Omitting the genome assembly makes guide design use the transcriptome as a

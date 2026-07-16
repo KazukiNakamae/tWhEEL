@@ -26,8 +26,11 @@ pathway workflows in separate output directories: `annotation` and
 - Linux or macOS
 - Python 3.12 (the currently used and documented environment)
 - A running Docker daemon and the Docker CLI
-- Network access when images, BUSCO data, GO ontology files, or UniProt/QuickGO
+- Network access when Docker images, BUSCO data, GO ontology files, or QuickGO
   records are not already cached
+- Active network access to `https://rest.uniprot.org` during every
+  `go_analysis` annotation run; these UniProt responses are not cached across
+  runs
 - RAM and storage appropriate for the input data and selected Docker images
 
 The current annotation implementations invoke `sudo docker build` for the
@@ -50,11 +53,11 @@ pip install -r requirements.txt
 The GO helper images may be built before the first run:
 
 ```bash
-docker build -t kazukinakamae/add-go-columns:v1.0 \
+docker build -t kazukinakamae/add-go-columns:v1.1 \
   src/docker/add_go_columns/
-docker build -t kazukinakamae/compute_go_kfi:v1.0 \
+docker build -t kazukinakamae/compute_go_kfi:v1.1 \
   src/docker/compute_go_kfi/
-docker build -t kazukinakamae/count_go_parent_terms:v1.0 \
+docker build -t kazukinakamae/count_go_parent_terms:v1.1 \
   src/docker/count_go_parent_terms/
 ```
 
@@ -69,8 +72,11 @@ docker build -t run_alignment_and_mask/v1.0 \
 Other configured images (TransDecoder, BUSCO, SeqKit, FASTA3, and CrisFlash)
 are pulled by Docker on first use if they are not available locally.
 
-Run commands from the repository root. Several Docker build contexts and
-mounted paths are resolved relative to the current working directory.
+Run commands from the repository root because local Docker build contexts are
+resolved from it. Runtime analysis files are mounted from the absolute
+`intermediate` directory, so `output.base_dir` may be relative or absolute and
+may be outside the repository. Docker Desktop users must allow file sharing for
+an absolute output location that is not already shared with Docker.
 
 ## Quick start: GO workflow
 
@@ -113,6 +119,20 @@ requires best-hit identifiers that UniProt can resolve. A custom database with
 unresolvable identifiers may be usable for annotation alone but will not
 produce usable GO annotations.
 
+The GO annotation helper requires an active network connection at runtime. It
+tries each failed UniProt batch up to three times, then stops without
+publishing a partially annotated table. If the error says that UniProt cannot
+be reached, ensure both the host and Docker can access
+`https://rest.uniprot.org`, connect to the internet if needed, and rerun only
+`go_analysis` in the same run directory:
+
+```bash
+python src/twheel.py \
+  --config config/my_analysis.yaml \
+  --step go_analysis \
+  --name tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis
+```
+
 ## Existing protein mode
 
 Provide a protein FASTA and enable `skip_if_protein_provided` to skip
@@ -138,8 +158,16 @@ transcript_id<TAB>protein_id
 ```
 
 The first two columns are read in that order, and the implementation constructs
-a `protein_id -> transcript_id` lookup. A normal, non-comment header row is
-treated as data and should not be used.
+a `protein_id -> transcript_id` lookup. Header rows are not allowed.
+
+Before a FASTA search starts, the mapping is checked against the prepared
+`intermediate/query.pep` and `intermediate/transcriptome.fa` files. Mapping
+protein IDs must exactly match all query protein IDs, and every mapped
+transcript ID must name a non-empty transcriptome FASTA record. Additional
+transcriptome records are allowed. Malformed rows, empty IDs, conflicting
+mappings for one protein ID, duplicate FASTA IDs, missing mappings, and missing
+mapped transcripts stop annotation with an error. These failures are not
+interpreted as genes without targetable guides.
 
 Existing protein mode is selected only when the configured protein file exists
 and `skip_if_protein_provided` is true (the option defaults to true when
@@ -189,6 +217,16 @@ execution:
 configuration in `config/input_for_PathwayAnalysis_20250917.yaml` is a local
 run record: it references `LOCAL_DATA`, which is excluded from Git and is not
 available in a fresh clone.
+
+When the SGD reference provides an exact Ensembl-to-SGD cross-reference, each
+annotation record that contains both an Ensembl ID and an explicit SGD identity
+must agree with that cross-reference. A conflicting record is quarantined from
+all pathway indexes, contributes no guide to PW-KFI, and is recorded as
+`conflicting_annotation_cross_reference` in both pathway audit artifacts. Empty
+legacy Ensembl fields and custom subjects without an explicit SGD identity
+remain supported. Pathway report generation also rejects stale mapping
+artifacts whose non-empty annotation Ensembl ID disagrees with their Ensembl
+pathway xref.
 
 ## Command-line usage
 
@@ -307,6 +345,20 @@ procedure.
 The HTML files are static reports. Keep the adjacent `static/` directory with
 the HTML file when moving a report.
 
+The Pathway HTML keeps its interactive data inline so it also works when opened
+directly from the filesystem. Its embedded payload contains summary statistics,
+the displayed pathway rows, pathway guide data, and generated SVG data once
+each. Raw `matched_genes` and pathway mapping rows are not copied into the HTML.
+The full machine-readable `web_data/pathway_summary.json` remains a separate
+output artifact and is not fetched by the report at runtime.
+
+Report inputs such as annotation text, FASTA identifiers, configuration paths,
+GO labels, and GPML labels are treated as untrusted display text. Embedded JSON
+uses script-safe Unicode escaping, dynamic tables use text nodes or explicit
+HTML escaping, and generated pathway SVG is validated before insertion. These
+protections preserve the original strings in embedded data and display them as
+text while preventing them from becoming executable HTML or JavaScript.
+
 ## Result semantics
 
 ### Single and Multi classifications
@@ -316,7 +368,10 @@ the HTML file when moving a report.
 
 These are similarity-hit groups, not an independent proof of biological gene or
 transcript redundancy. Each group receives a generated `unique_id`, which is
-the gene-level counting unit used by GO-KFI.
+the downstream gene-level counting unit. The final annotation TSV retains its
+contig-level rows as provenance, but report gene counts, report guide counts,
+GO-KFI, and PW-KFI collapse those rows by `unique_id` and count each distinct
+guide entry once within the resulting gene group.
 
 ### Site-specific guides
 
@@ -338,6 +393,12 @@ GO-KFI = unique genes with at least one retained guide
 Scores are classified as Fully (`1.0`), Partially (`0 < score < 1.0`), or Not
 targetable (`0.0`).
 
+The GO Slim parent summary assigns each fully targetable GO term to exactly one
+`is_a` ancestor. The input term itself is preferred, otherwise the nearest GO
+Slim ancestor is selected by edge distance. Equal-distance candidates are
+resolved by ascending GO ID. Equal-count summary rows are also ordered by GO
+ID, so a fixed ontology and input produce the same assignment and table order.
+
 ### PW-KFI
 
 Pathway gene nodes are filtered by configured database/identifier contracts and
@@ -352,7 +413,8 @@ PW-KFI = canonical pathway genes with at least one retained guide
 Pathways with unresolved cross-database canonical identity are skipped. Low
 annotation coverage is either reported or skipped according to
 `minimum_pathway_coverage` and `skip_low_coverage_pathways`. The two pathway
-audit TSV files record matching, exclusion, and identifier issues.
+audit TSV files record matching, exclusion, and identifier issues. Conflicting
+Ensembl/SGD identities are fail-closed and never transfer guides between genes.
 
 ## Testing
 
@@ -381,12 +443,32 @@ implementation's `sudo docker build` calls work in your environment. Linux
 group-management commands such as `usermod` do not apply to Docker Desktop on
 macOS.
 
+### Protein-transcript mapping validation fails
+
+Use a headerless `transcript_id<TAB>protein_id` TSV. Its protein IDs must match
+the first header tokens in the supplied protein FASTA exactly, and each mapped
+transcript must match a non-empty first header token in the transcriptome
+FASTA. Do not reverse the two columns. Correct the input files and rerun the
+`annotation` or `sgd_annotation` step; mapping inconsistencies are deliberately
+not converted into untargetable genes. If a supplied protein intentionally has
+no corresponding transcript record, remove it from the protein FASTA instead
+of using a partial mapping.
+
+### UniProt API cannot be reached
+
+If a connection or timeout error occurs, ensure that both the host and Docker
+can access `https://rest.uniprot.org`. Connect to the internet if needed, then
+rerun `go_analysis` with the same configuration file and the complete existing
+`tWhEEL_on_...` run name, as shown in the command above. The failed run does not
+publish a partially annotated table.
+
 ### GO annotations are empty
 
 Check that the best-hit subject identifiers resolve as UniProtKB accessions and
 that the UniProt REST API is reachable. A generic custom FASTA identifier is
 accepted by annotation but is not automatically convertible to a UniProt
-record.
+record. A valid UniProtKB accession can also legitimately have no GO
+annotation.
 
 ### Reports open without styling or images
 

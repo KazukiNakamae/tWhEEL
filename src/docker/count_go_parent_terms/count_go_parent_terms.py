@@ -20,6 +20,8 @@ from collections import Counter
 from goatools.obo_parser import GODag
 import requests, pathlib, matplotlib.pyplot as plt
 
+from go_slim_mapping import map_to_parent, sort_count_rows
+
 GENERIC_SLIM_URL = ("http://current.geneontology.org/ontology/"
                     "subsets/goslim_generic.obo")
 
@@ -46,18 +48,6 @@ def load_parent_set(go_dag, parent_file: str | None):
         slim_dag = GODag(str(slim_path))
         parents = {go for go in slim_dag if go in go_dag}
     return parents
-
-def map_to_parent(go_id, parents, dag):
-    """最初にヒットした “もっとも近い” 親 slim を返す"""
-    if go_id in parents:
-        return go_id
-    node = dag.get(go_id)
-    if not node:
-        return None
-    for anc in node.get_all_parents():
-        if anc in parents:
-            return anc
-    return None
 
 def main():
     p = argparse.ArgumentParser(
@@ -91,8 +81,9 @@ def main():
     counts = Counter(m for m in mapped if m)
 
     # --- 出力 CSV ---------------------------------------------------
-    rows = [(go, dag[go].name, n) for go, n in counts.items()]
-    rows.sort(key=lambda x: x[2], reverse=True)
+    rows = sort_count_rows(
+        (go, dag[go].name, n) for go, n in counts.items()
+    )
     pd.DataFrame(rows,
                  columns=["Parent GO", "Description", "count"]
                 ).to_csv(args.out_csv, index=False)

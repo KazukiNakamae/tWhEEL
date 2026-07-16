@@ -9,6 +9,8 @@ import subprocess
 import logging
 import gzip
 import shutil
+
+from .docker_workspace import DockerWorkspace
 import csv
 from pathlib import Path
 
@@ -222,6 +224,109 @@ class GuideDesign:
         return declared_multi_ids
 
     @staticmethod
+    def _single_gene_ids_from_fasta(single_genes_path):
+        """Return validated Single IDs represented in an extracted FASTA file."""
+        path = Path(single_genes_path)
+        if not path.is_file():
+            return set()
+
+        single_ids = set()
+        current_id = None
+        current_sequence_length = 0
+        with path.open('r', encoding='utf-8') as handle:
+            for line_number, line in enumerate(handle, 1):
+                stripped_line = line.strip()
+                if not stripped_line:
+                    continue
+                if stripped_line.startswith('>'):
+                    if current_id is not None and current_sequence_length == 0:
+                        raise RuntimeError(
+                            "Single-gene FASTA contains an empty sequence for "
+                            f"{current_id}: {path}"
+                        )
+                    header_text = stripped_line[1:].strip()
+                    identifier = (
+                        header_text.split(maxsplit=1)[0]
+                        if header_text else ''
+                    )
+                    if not identifier:
+                        raise ValueError(
+                            "Invalid Single-gene FASTA identifier at "
+                            f"{path}:{line_number}"
+                        )
+                    if identifier in single_ids:
+                        raise RuntimeError(
+                            "Duplicate Single-gene FASTA identifier at "
+                            f"{path}:{line_number}: {identifier}"
+                        )
+                    single_ids.add(identifier)
+                    current_id = identifier
+                    current_sequence_length = 0
+                else:
+                    if current_id is None:
+                        raise RuntimeError(
+                            f"Invalid Single-gene FASTA sequence at "
+                            f"{path}:{line_number}"
+                        )
+                    current_sequence_length += len(stripped_line)
+
+        if current_id is not None and current_sequence_length == 0:
+            raise RuntimeError(
+                "Single-gene FASTA contains an empty sequence for "
+                f"{current_id}: {path}"
+            )
+        return single_ids
+
+    def _expected_single_gene_ids(self, single_genes_path):
+        """Reconcile declared Single genes with the extracted sequence FASTA."""
+        fasta_single_ids = self._single_gene_ids_from_fasta(single_genes_path)
+        classified_path = Path(self.intermediate_dir) / 'annotation_classified.txt'
+        if not classified_path.is_file():
+            return fasta_single_ids
+
+        with classified_path.open(
+            'r', encoding='utf-8', newline=''
+        ) as handle:
+            reader = csv.DictReader(handle, delimiter='\t')
+            required_columns = {'classification', 'unique_id'}
+            available_columns = set(reader.fieldnames or [])
+            missing_columns = sorted(required_columns - available_columns)
+            if missing_columns:
+                raise ValueError(
+                    "Annotation classification file is missing required "
+                    "columns: " + ','.join(missing_columns)
+                )
+
+            declared_single_ids = set()
+            for row_number, row in enumerate(reader, 2):
+                if (row.get('classification') or '').strip() != 'Single':
+                    continue
+                unique_id = (row.get('unique_id') or '').strip()
+                if not unique_id:
+                    raise ValueError(
+                        "Single-gene annotation has no unique_id at "
+                        f"{classified_path}:{row_number}"
+                    )
+                declared_single_ids.add(unique_id)
+
+        missing_single_ids = sorted(declared_single_ids - fasta_single_ids)
+        unexpected_single_ids = sorted(fasta_single_ids - declared_single_ids)
+        if missing_single_ids or unexpected_single_ids:
+            details = []
+            if missing_single_ids:
+                details.append('missing=' + ','.join(missing_single_ids))
+            if unexpected_single_ids:
+                details.append(
+                    'unexpected=' + ','.join(unexpected_single_ids)
+                )
+            raise RuntimeError(
+                "Single-gene sequence FASTA does not match annotation "
+                "declarations: " + '; '.join(details)
+            )
+
+        return declared_single_ids
+
+    @staticmethod
     def _validate_multi_consensus_file(consensus_path, expected_multi_id):
         """Require one non-empty FASTA record matching its Multi group."""
         path = Path(consensus_path)
@@ -410,7 +515,8 @@ class GuideDesign:
         
         # Single遺伝子の処理
         single_genes_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
-        if os.path.exists(single_genes_path):
+        expected_single_ids = self._expected_single_gene_ids(single_genes_path)
+        if expected_single_ids:
             # Single遺伝子を1行形式に変換
             self._format_fasta_oneline(single_genes_path)
             
@@ -431,21 +537,22 @@ class GuideDesign:
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, f'{gene_type}_targets.bed')
+        workspace = DockerWorkspace(self.intermediate_dir, '/data')
         
         # CrisFlashコマンド
         cmd = [
             "docker", "run", "--rm",
-            "-v", f"{os.getcwd()}:/data",
+            "-v", workspace.volume_spec,
             "-m", self.config['crispr']['memory'],
             "--cpus", str(self.config['crispr']['threads']),
             self.config['crispr']['docker_image'],
             "crisflash",
-            "-g", f"/data/{genome_path}",
-            "-s", f"/data/{gene_path}",
+            "-g", workspace.container_path(genome_path),
+            "-s", workspace.container_path(gene_path),
             "-p", self.config['crispr']['pam_pattern'],
             "-m", str(self.config['crispr']['max_mismatch']),
             "-t", str(self.config['crispr']['threads']),
-            "-o", f"/data/{output_path}"
+            "-o", workspace.container_path(output_path)
         ]
         
         self.logger.debug(f"CrisFlash execution command: {' '.join(cmd)}")

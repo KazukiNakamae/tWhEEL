@@ -364,9 +364,11 @@ class PathwayAnalysis:
         annotation_data = {
             'by_database': {name: {} for name in database_configs},
             'ambiguous_by_database': {name: set() for name in database_configs},
+            'identifier_failures': {name: {} for name in database_configs},
             'database_status': {},
             'by_subject_id': {},
             'ambiguous_subject_ids': set(),
+            'subject_failures': {},
             'subject_id_column_available': False,
             'cross_references': {},
         }
@@ -522,6 +524,10 @@ class PathwayAnalysis:
                 ),
             )
 
+        ensembl_resolver = self._load_sgd_identifier_crosswalk()
+        annotation_data['cross_references']['Ensembl'] = ensembl_resolver
+        ensembl_config = database_configs.get('Ensembl')
+
         for subject_id in sorted(records_by_subject):
             subject_records = records_by_subject[subject_id]
             conflicts = {
@@ -616,6 +622,78 @@ class PathwayAnalysis:
                     ),
                 })
                 continue
+
+            if ensembl_config is not None and ensembl_resolver.get('available'):
+                ensembl_key = ensembl_config['annotation_key']
+                explicit_ensembl_id = str(
+                    aggregate.get(ensembl_key, '') or ''
+                ).strip()
+                authoritative_subject_ids = set()
+                if re.fullmatch(r'SGDID:S\d{9}', subject_id):
+                    authoritative_subject_ids.add(subject_id)
+                if re.fullmatch(r'S\d{9}', explicit_sgd_id):
+                    authoritative_subject_ids.add(
+                        f"SGDID:{explicit_sgd_id}"
+                    )
+
+                expected_subject_id = ''
+                if (
+                    explicit_ensembl_id
+                    and re.fullmatch(
+                        ensembl_config['id_pattern'], explicit_ensembl_id
+                    ) is not None
+                    and explicit_ensembl_id not in ensembl_resolver.get(
+                        'ambiguous_ensembl_ids', set()
+                    )
+                ):
+                    expected_subject_id = ensembl_resolver.get(
+                        'ensembl_to_subject', {}
+                    ).get(explicit_ensembl_id, '')
+
+                if (
+                    expected_subject_id
+                    and authoritative_subject_ids
+                    and expected_subject_id not in authoritative_subject_ids
+                ):
+                    failure_reason = (
+                        'conflicting_annotation_cross_reference'
+                    )
+                    annotation_data['ambiguous_subject_ids'].add(subject_id)
+                    annotation_data['subject_failures'][subject_id] = (
+                        failure_reason
+                    )
+                    for database, db_config in database_configs.items():
+                        annotation_key = db_config['annotation_key']
+                        identifier = str(
+                            aggregate.get(annotation_key, '') or ''
+                        ).strip()
+                        if identifier and re.fullmatch(
+                            db_config['id_pattern'], identifier
+                        ) is not None:
+                            annotation_data['ambiguous_by_database'][
+                                database
+                            ].add(identifier)
+                            annotation_data['identifier_failures'][
+                                database
+                            ][identifier] = failure_reason
+                    add_issue({
+                        'database': 'Ensembl',
+                        'annotation_key': ensembl_key,
+                        'identifier': explicit_ensembl_id,
+                        'reason': failure_reason,
+                        'query_id': ','.join(query_ids),
+                        'unique_id': ','.join(unique_ids),
+                        'conflicting_fields': (
+                            'ensembl_id,subject_id,sgd_id'
+                        ),
+                        'candidate_values': (
+                            f"annotation_ensembl_id={explicit_ensembl_id};"
+                            f"annotation_subject_id={subject_id};"
+                            f"annotation_sgd_id={explicit_sgd_id};"
+                            f"resolver_subject_id={expected_subject_id}"
+                        ),
+                    })
+                    continue
             annotation_data['by_subject_id'][subject_id] = aggregate
 
         for database, db_config in sorted(database_configs.items()):
@@ -669,9 +747,15 @@ class PathwayAnalysis:
                     continue
                 annotation_data['by_database'][database][identifier] = records[0]
 
-        annotation_data['cross_references']['Ensembl'] = (
-            self._load_sgd_identifier_crosswalk()
-        )
+        # If both a valid record and a quarantined conflicting record claim the
+        # same identifier, preserve the existing ambiguity reason rather than
+        # presenting the conflict as a single-record failure.
+        for database in sorted(database_configs):
+            for identifier in annotation_data['by_database'][database]:
+                annotation_data['identifier_failures'][database].pop(
+                    identifier, None
+                )
+
         self.annotation_identifier_issues.sort(key=lambda issue: tuple(
             str(issue.get(field, ''))
             for field in (
@@ -734,7 +818,12 @@ class PathwayAnalysis:
             matched_annotation_id = ''
             failure_reason = ''
 
-            if gene_id in annotation_data['ambiguous_by_database'].get(database, set()):
+            identifier_failure = annotation_data.get(
+                'identifier_failures', {}
+            ).get(database, {}).get(gene_id, '')
+            if identifier_failure:
+                failure_reason = identifier_failure
+            elif gene_id in annotation_data['ambiguous_by_database'].get(database, set()):
                 failure_reason = 'ambiguous_annotation_identifier'
             else:
                 record = annotation_data['by_database'].get(database, {}).get(gene_id)
@@ -790,7 +879,12 @@ class PathwayAnalysis:
 
             if record is None and not failure_reason and database == 'SGD':
                 subject_id = f"SGDID:{gene_id}"
-                if subject_id in annotation_data['ambiguous_subject_ids']:
+                subject_failure = annotation_data.get(
+                    'subject_failures', {}
+                ).get(subject_id, '')
+                if subject_failure:
+                    failure_reason = subject_failure
+                elif subject_id in annotation_data['ambiguous_subject_ids']:
                     failure_reason = 'ambiguous_annotation_subject_id'
                 else:
                     record = annotation_data['by_subject_id'].get(subject_id)
@@ -814,6 +908,12 @@ class PathwayAnalysis:
                     subject_id = resolver.get('ensembl_to_subject', {}).get(gene_id)
                     if not subject_id:
                         failure_reason = 'cross_reference_not_found'
+                    elif annotation_data.get(
+                        'subject_failures', {}
+                    ).get(subject_id, ''):
+                        failure_reason = annotation_data[
+                            'subject_failures'
+                        ][subject_id]
                     elif subject_id in annotation_data['ambiguous_subject_ids']:
                         failure_reason = 'ambiguous_annotation_subject_id'
                     else:
@@ -825,10 +925,26 @@ class PathwayAnalysis:
                                 else 'annotation_subject_id_column_unavailable'
                             )
                         else:
-                            match_method = 'exact_sgd_fasta_cross_reference'
-                            mapping_source = resolver.get('source_path', '')
-                            matched_annotation_key = 'subject_id'
-                            matched_annotation_id = subject_id
+                            explicit_ensembl_id = str(
+                                record.get(annotation_key, '') or ''
+                            ).strip()
+                            if (
+                                explicit_ensembl_id
+                                and explicit_ensembl_id != gene_id
+                            ):
+                                record = None
+                                failure_reason = (
+                                    'conflicting_annotation_cross_reference'
+                                )
+                            else:
+                                match_method = (
+                                    'exact_sgd_fasta_cross_reference'
+                                )
+                                mapping_source = resolver.get(
+                                    'source_path', ''
+                                )
+                                matched_annotation_key = 'subject_id'
+                                matched_annotation_id = subject_id
 
             if record is None:
                 if not failure_reason:

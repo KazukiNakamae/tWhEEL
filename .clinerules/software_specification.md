@@ -114,6 +114,10 @@ transcript_id<TAB>protein_id
 ```
 
 Extra columns are ignored. The loader stores `protein_id -> transcript_id`.
+The mapping protein IDs must exactly cover the prepared protein FASTA IDs, and
+every mapped transcript ID must exist as a non-empty prepared transcript FASTA
+record. Additional transcript FASTA records are allowed. Any mapping format or
+identifier inconsistency stops annotation before the similarity search.
 
 ### 3.3 Effective protein input mode
 
@@ -235,6 +239,10 @@ Responsibilities:
 - retain site-specific targets; and
 - merge guide data into `annotation_with_guides_final.tsv`.
 
+The final table retains contig-level annotation rows for provenance. All
+gene-level report statistics and embedded report tables collapse those rows by
+`unique_id`; guide entries are unioned within each group before counting.
+
 CrisFlash target field four has the form
 `<sequence>/<MM0>/<MM1-2>`. A site-specific target is retained only when
 `MM0 == 1` and `MM1-2 == 0`. Other CrisFlash scores are passed through without
@@ -263,6 +271,10 @@ GO-KFI = unique genes with retained guides / unique genes in the GO term
 
 Classification values are `Fully`, `Partially`, and `Not`.
 
+GO Slim summaries assign each fully targetable term to one `is_a` category.
+Selection uses the minimum ancestor edge distance and breaks equal-distance
+ties by ascending GO ID. Summary rows use descending count and ascending GO ID.
+
 Although standard annotation accepts custom FASTA identifiers, GO lookup
 requires best-hit subject identifiers that can be interpreted as UniProtKB
 accessions.
@@ -276,6 +288,8 @@ Responsibilities:
 - parse GPML 2013a `GeneProduct` nodes;
 - retain only configured database/identifier pairs;
 - match exact annotation identifiers and exact SGD FASTA cross-references;
+- cross-validate explicit annotation Ensembl and SGD identities, quarantining
+  conflicting subjects from every pathway index;
 - collapse duplicate nodes and exact cross-database aliases into canonical gene
   units;
 - fail closed for ambiguous or incomplete cross-database identity;
@@ -309,6 +323,11 @@ Responsibilities:
 - generate static assets; and
 - generate `report.html` when enabled.
 
+All external strings are context-escaped before HTML rendering. JSON embedded
+in HTML script elements escapes HTML raw-text delimiters while remaining valid
+JSON, and dynamic report tables never place unescaped external strings into
+`innerHTML` or inline event-handler source.
+
 QuickGO supplies missing GO labels and definitions. Native analysis tables are
 not loaded into SQLite.
 
@@ -320,12 +339,26 @@ Responsibilities:
 
 - require and reconcile `pathway_kfi_table.csv` with
   `pathway_gene_mapping.tsv`;
+- reject a canonical mapping unit whose non-empty annotation Ensembl ID is not
+  one of its Ensembl pathway xrefs;
 - publish those files and referenced GPML files in the pathway snapshot;
 - reuse the standard report shell and assets;
 - render pathway SVG content from GPML graphics/interactions;
 - embed pathway-specific guide exports;
 - generate `web_data/pathway_summary.json`; and
 - generate one HTML file named by `pathway_report.output_name`.
+
+GPML labels and identifiers are escaped in generated SVG attributes and text.
+The browser validates embedded SVG against the report's element and attribute
+allowlist before inserting it into the document.
+
+The standalone Pathway HTML embeds one compact runtime projection: summary
+metadata/statistics, displayed pathway rows, pathway guide data, and generated
+SVG data. Large guide and SVG payloads occur once, while raw `matched_genes`
+and pathway mapping rows remain source artifacts rather than browser payload.
+The browser parses this embedded JSON once and reuses it for every interaction.
+`web_data/pathway_summary.json` retains the full machine-readable summary
+artifact independently of the HTML projection.
 
 The pathway report does not create a pathway SQLite database.
 
@@ -442,8 +475,9 @@ Two metadata limitations remain in the current source:
 
 ## 9. Development and extension rules
 
-- Run from the repository root because several Docker build contexts and data
-  mounts are relative to the current working directory.
+- Run from the repository root because local Docker build contexts are relative
+  to it. Runtime data paths are translated from an absolute `intermediate`
+  workspace and do not depend on the current working directory.
 - Use Python 3.12 for the documented environment.
 - Keep code comments, docstrings, configuration comments, and manuals in
   English.

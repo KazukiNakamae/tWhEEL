@@ -507,6 +507,42 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             'SGD::SGDID:S000000056',
         )
 
+    def test_matching_annotation_ensembl_id_reconciles_with_pathway_xref(self):
+        self.write_canonical_artifacts(
+            gene_overrides={'ensembl_id': 'YAL060W'}
+        )
+
+        pathways, pathway_genes = (
+            self.generator.load_pathway_analysis_results()
+        )
+
+        self.assertEqual(len(pathways), 1)
+        self.assertEqual(
+            pathway_genes['WP9999'][0]['ensembl_id'], 'YAL060W'
+        )
+
+    def test_empty_annotation_ensembl_id_remains_legacy_compatible(self):
+        self.write_canonical_artifacts(
+            gene_overrides={'ensembl_id': ''}
+        )
+
+        pathways, pathway_genes = (
+            self.generator.load_pathway_analysis_results()
+        )
+
+        self.assertEqual(len(pathways), 1)
+        self.assertEqual(pathway_genes['WP9999'][0]['ensembl_id'], '')
+
+    def test_conflicting_annotation_ensembl_id_is_rejected(self):
+        self.write_canonical_artifacts(
+            gene_overrides={'ensembl_id': 'YBR160W'}
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, 'Annotation Ensembl identifier does not reconcile'
+        ):
+            self.generator.load_pathway_analysis_results()
+
     def test_single_database_unit_does_not_require_cross_database_resolution(self):
         self.write_canonical_artifacts(
             gene_overrides={'canonicalization_complete': False}
@@ -623,8 +659,23 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         first_embedded = self.embedded_pathway_data(
             first_results['html_report_path']
         )
+        first_summary = json.loads(
+            Path(first_results['summary_json_path']).read_text(
+                encoding='utf-8'
+            )
+        )
 
         self.assertNotIn('database_path', first_results)
+        self.assertNotIn('pathway_guide_data', first_embedded['summary'])
+        self.assertNotIn('pathway_svgs', first_embedded['summary'])
+        self.assertEqual(
+            first_embedded['pathway_guide_data'],
+            first_summary['pathway_guide_data'],
+        )
+        self.assertEqual(
+            first_embedded['pathway_svgs'],
+            first_summary['pathway_svgs'],
+        )
         self.assertEqual(
             database_path.read_bytes(), b'pre-existing database sentinel'
         )
@@ -812,6 +863,71 @@ class PathwayReportIdentifierTests(unittest.TestCase):
                     html_content.count(f'<h2>{label}</h2>'), 1
                 )
 
+    def test_html_embeds_each_large_pathway_payload_once(self):
+        guide_sentinel = 'UNIQUE_GUIDE_PAYLOAD_' + ('G' * 4096)
+        svg_sentinel = 'UNIQUE_SVG_PAYLOAD_' + ('S' * 4096)
+        matched_genes_sentinel = 'UNUSED_MATCHED_GENES_' + ('M' * 4096)
+        mapping_sentinel = 'UNUSED_MAPPING_ROW_' + ('R' * 4096)
+        statistics = {'pathway_analysis': {'total_pathways': 1}}
+        summary = {
+            'timestamp': '2026-07-17 00:00:00',
+            'statistics': statistics,
+            'pathway_guide_data': {
+                'WP1': {'guides': [{'guide_sequence': guide_sentinel}]},
+            },
+            'pathway_svgs': {
+                'WP1': {'svg_content': svg_sentinel},
+            },
+        }
+        pathways = [{
+            'pathway_id': 'WP1',
+            'pathway_name': 'Compact pathway',
+            'total_genes': 1,
+            'total_gene_nodes': 1,
+            'evaluable_gene_node_count': 1,
+            'unique_xref_count': 1,
+            'matched_genes': matched_genes_sentinel,
+            'genes_with_guides': 1,
+            'pw_kfi_score': 1.0,
+            'targetable_type': 'Fully targetable',
+            'coverage_rate': 1.0,
+        }]
+        pathway_genes = {
+            'WP1': [{'canonical_subject_id': mapping_sentinel}],
+        }
+
+        html_content = self.generator.create_pathway_html_template(
+            pathways, summary, pathway_genes
+        )
+        marker = '<script type="application/json" id="pathway-data">'
+        raw_payload = html_content.split(marker, 1)[1].split(
+            '</script>', 1
+        )[0]
+        payload = json.loads(raw_payload)
+
+        self.assertEqual(set(payload), {
+            'summary', 'pathways', 'pathway_guide_data', 'pathway_svgs',
+        })
+        self.assertEqual(payload['summary'], {
+            'timestamp': summary['timestamp'],
+            'statistics': statistics,
+        })
+        self.assertEqual(
+            payload['pathway_guide_data'], summary['pathway_guide_data']
+        )
+        self.assertEqual(payload['pathway_svgs'], summary['pathway_svgs'])
+        self.assertNotIn('matched_genes', payload['pathways'][0])
+        self.assertEqual(raw_payload.count(guide_sentinel), 1)
+        self.assertEqual(raw_payload.count(svg_sentinel), 1)
+        self.assertNotIn(matched_genes_sentinel, raw_payload)
+        self.assertNotIn(mapping_sentinel, raw_payload)
+        self.assertEqual(
+            html_content.count('JSON.parse(dataElement.textContent)'), 1
+        )
+        self.assertEqual(
+            html_content.count('const data = getPathwayReportData();'), 5
+        )
+
     def test_pw_kfi_content_is_grouped_in_one_assessment_section(self):
         html_content = self.generator.create_pathway_html_template(
             [],
@@ -913,6 +1029,71 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         self.assertIn('<strong>PAM Pattern:</strong> NAG', html_content)
         self.assertIn('<strong>Max Mismatch:</strong> 3', html_content)
         self.assertIn('<strong>Threads:</strong> 7', html_content)
+
+    def test_common_sections_collapse_multi_contig_rows(self):
+        self.write_canonical_artifacts(
+            gene_overrides={'unique_id': 'Multi_fixture'}
+        )
+        self.write_common_report_artifacts()
+
+        annotation_header = '\t'.join([
+            'query_id', 'subject_id', 'identity', 'alignment_length',
+            'evalue', 'bit_score', 'description', 'gene_name',
+            'classification', 'unique_id',
+        ])
+        annotation_rows = [
+            '\t'.join([
+                'fixture_query_a', 'fixture_subject', '99.0', '100',
+                '1e-20', '200', 'Fixture annotation description',
+                'FIXTURE_GENE', 'Multi', 'Multi_fixture',
+            ]),
+            '\t'.join([
+                'fixture_query_b', 'fixture_subject', '98.0', '90',
+                '1e-18', '180', 'Fixture annotation description',
+                'FIXTURE_GENE', 'Multi', 'Multi_fixture',
+            ]),
+        ]
+        (self.intermediate_dir / 'annotation_classified.txt').write_text(
+            annotation_header + '\n' + '\n'.join(annotation_rows) + '\n',
+            encoding='utf-8',
+        )
+
+        guide_a = 'Multi_fixture/10/33/GUIDE_A/1/0/0.987/+'
+        guide_b = 'Multi_fixture/20/43/GUIDE_B/1/0/0.986/-'
+        final_rows = [
+            annotation_rows[0] + '\t' + guide_a,
+            annotation_rows[1] + '\t' + ','.join([guide_a, guide_b]),
+        ]
+        (
+            self.intermediate_dir / 'annotation_with_guides_final.tsv'
+        ).write_text(
+            annotation_header + '\tguide_targets\n'
+            + '\n'.join(final_rows) + '\n',
+            encoding='utf-8',
+        )
+
+        results = self.generator.run()
+        embedded_data = self.embedded_report_data(
+            results['html_report_path']
+        )
+
+        self.assertEqual(embedded_data['statistics']['annotation'], {
+            'multi_genes': 1,
+            'single_genes': 0,
+            'total_genes': 1,
+        })
+        self.assertEqual(
+            embedded_data['statistics']['guide_design']['total_guides'], 2
+        )
+        self.assertEqual(len(embedded_data['gene_annotation']), 1)
+        self.assertEqual(
+            embedded_data['gene_annotation'][0]['query_id'],
+            'fixture_query_a; fixture_query_b',
+        )
+        self.assertEqual(
+            embedded_data['gene_annotation'][0]['target_count'], 2
+        )
+        self.assertEqual(len(embedded_data['guide_rna']), 2)
 
     def test_html_guide_lookup_has_no_gene_name_fallback(self):
         html_content = self.generator.create_pathway_html_template(

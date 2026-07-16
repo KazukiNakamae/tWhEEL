@@ -38,7 +38,7 @@ class ProteinInputModeTests(unittest.TestCase):
             missing_protein_path = temp_dir / 'missing.fasta'
             transcriptome_path.write_text('>tx1\nATGC\n', encoding='utf-8')
             protein_path.write_text('>protein1\nMPEPTIDE\n', encoding='utf-8')
-            mapping_path.write_text('protein1\ttx1\n', encoding='utf-8')
+            mapping_path.write_text('tx1\tprotein1\n', encoding='utf-8')
 
             cases = [
                 ('', True, '', TRANSDECODER_MODE),

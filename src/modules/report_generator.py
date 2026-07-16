@@ -13,6 +13,7 @@ import csv
 import time
 import itertools
 import tempfile
+import html
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -26,6 +27,19 @@ from .report_source_store import ReportSourceStore
 
 # CSVフィールドサイズ制限を増加
 csv.field_size_limit(1 << 30)
+
+
+def serialize_json_for_html_script(value, *, indent=None):
+    """Serialize JSON without allowing data to terminate its script element."""
+    serialized = json.dumps(value, ensure_ascii=False, indent=indent)
+    return (
+        serialized
+        .replace('&', '\\u0026')
+        .replace('<', '\\u003c')
+        .replace('>', '\\u003e')
+        .replace('\u2028', '\\u2028')
+        .replace('\u2029', '\\u2029')
+    )
 
 class ReportGenerator:
     """Report generation processing class"""
@@ -125,6 +139,11 @@ class ReportGenerator:
             (results.get('report_data') or {}).get(key)
             or (results.get('data') or {}).get(key)
         )
+
+    @staticmethod
+    def _escape_html(value):
+        """Escape external text for HTML text and quoted attributes."""
+        return html.escape(str(value), quote=True)
         
     def collect_all_results(self):
         """Collect results from all steps"""
@@ -222,7 +241,8 @@ class ReportGenerator:
                 stats['annotation']['single_genes'] = single_count
                 stats['annotation']['total_genes'] = multi_count + single_count
         except Exception as e:
-            self.logger.warning(f"Annotation statistics collection error: {e}")
+            self.logger.error(f"Annotation statistics collection error: {e}")
+            raise
         
         # Guide design statistics
         try:
@@ -239,7 +259,8 @@ class ReportGenerator:
             stats['guide_design'].update(guide_rna_stats)
             
         except Exception as e:
-            self.logger.warning(f"Guide design statistics collection error: {e}")
+            self.logger.error(f"Guide design statistics collection error: {e}")
+            raise
         
         # GO analysis statistics
         try:
@@ -260,23 +281,100 @@ class ReportGenerator:
                     count += 1
         return count
     
+    @staticmethod
+    def _split_guide_targets(value):
+        """Return non-empty guide records without changing their order."""
+        return [
+            target.strip()
+            for target in str(value or '').split(',')
+            if target.strip()
+        ]
+
+    @classmethod
+    def _load_canonical_gene_rows(cls, annotation_path):
+        """Collapse contig-level annotation rows into unique gene groups."""
+        with open(annotation_path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            fieldnames = set(reader.fieldnames or [])
+            required_columns = {'classification', 'unique_id'}
+            missing_columns = sorted(required_columns - fieldnames)
+            if missing_columns:
+                raise ValueError(
+                    "Annotation table is missing required column(s): "
+                    + ', '.join(missing_columns)
+                )
+
+            groups = {}
+            for row_number, row in enumerate(reader, 2):
+                unique_id = (row.get('unique_id') or '').strip()
+                classification = (row.get('classification') or '').strip()
+                if not unique_id:
+                    raise ValueError(
+                        f"Annotation row {row_number} has no unique_id"
+                    )
+                if classification not in {'Multi', 'Single'}:
+                    raise ValueError(
+                        f"Annotation row {row_number} has unsupported "
+                        f"classification: {classification or '<empty>'}"
+                    )
+
+                group = groups.get(unique_id)
+                if group is None:
+                    representative = dict(row)
+                    representative['unique_id'] = unique_id
+                    representative['classification'] = classification
+                    group = {
+                        'row': representative,
+                        'query_ids': [],
+                        'query_id_set': set(),
+                        'guide_targets': [],
+                        'guide_target_set': set(),
+                        'annotation_row_count': 0,
+                    }
+                    groups[unique_id] = group
+                else:
+                    representative = group['row']
+                    for field in ('classification', 'subject_id'):
+                        existing = (representative.get(field) or '').strip()
+                        candidate = (row.get(field) or '').strip()
+                        if existing and candidate and existing != candidate:
+                            raise ValueError(
+                                f"Annotation rows for {unique_id} have "
+                                f"conflicting {field} values: "
+                                f"{existing!r} and {candidate!r}"
+                            )
+                        if not existing and candidate:
+                            representative[field] = candidate
+
+                query_id = (row.get('query_id') or '').strip()
+                if query_id and query_id not in group['query_id_set']:
+                    group['query_id_set'].add(query_id)
+                    group['query_ids'].append(query_id)
+
+                for target in cls._split_guide_targets(
+                    row.get('guide_targets', '')
+                ):
+                    if target not in group['guide_target_set']:
+                        group['guide_target_set'].add(target)
+                        group['guide_targets'].append(target)
+
+                group['annotation_row_count'] += 1
+
+        canonical_rows = []
+        for group in groups.values():
+            row = group['row']
+            row['query_id'] = '; '.join(group['query_ids'])
+            row['guide_targets'] = ','.join(group['guide_targets'])
+            row['annotation_row_count'] = group['annotation_row_count']
+            canonical_rows.append(row)
+        return canonical_rows
+
     def _count_gene_classifications(self, annotation_path):
-        """Count gene classifications"""
-        multi_count = 0
-        single_count = 0
-        
-        with open(annotation_path, 'r') as f:
-            header = f.readline()
-            for line in f:
-                fields = line.strip().split('\t')
-                if len(fields) >= 9:
-                    classification = fields[8]
-                    if classification == 'Multi':
-                        multi_count += 1
-                    elif classification == 'Single':
-                        single_count += 1
-        
-        return multi_count, single_count
+        """Count canonical gene groups rather than contig annotation rows."""
+        counts = {'Multi': 0, 'Single': 0}
+        for row in self._load_canonical_gene_rows(annotation_path):
+            counts[row['classification']] += 1
+        return counts['Multi'], counts['Single']
     
     def _count_lines(self, filepath):
         """Count lines in file"""
@@ -302,43 +400,33 @@ class ReportGenerator:
             return stats
         
         try:
-            with open(annotation_path, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f, delimiter='\t')
-                header = next(reader)
-                
-                for row in reader:
-                    if len(row) >= 11 and row[-1]:  # guide_targets列が存在
-                        guide_targets = row[-1]
-                        
-                        if guide_targets and guide_targets.strip():
-                            targets = guide_targets.split(',')
-                            for target in targets:
-                                if target.strip():
-                                    guide_parts = target.strip().split('/')
-                                    if len(guide_parts) >= 8:
-                                        # Total Guides
-                                        stats['total_guides'] += 1
-                                        
-                                        # MM0とMM1-2の値を取得
-                                        mm0 = int(guide_parts[4]) if guide_parts[4].isdigit() else 0
-                                        mm1_2 = int(guide_parts[5]) if guide_parts[5].isdigit() else 0
-                                        reference = guide_parts[0]
-                                        
-                                        # Site-Specific判定 (MM0=1 and MM1-2=0 → off_target_score=1)
-                                        if mm0 == 1 and mm1_2 == 0:
-                                            stats['site_specific_guides'] += 1
-                                            
-                                            # Multi/Single判定
-                                            if reference.startswith('Multi_'):
-                                                stats['site_specific_multi_target'] += 1
-                                            elif reference.startswith('Single_'):
-                                                stats['site_specific_single_target'] += 1
+            for row in self._load_canonical_gene_rows(annotation_path):
+                classification = row['classification']
+                for target in self._split_guide_targets(
+                    row.get('guide_targets', '')
+                ):
+                    guide_parts = target.split('/')
+                    if len(guide_parts) >= 8:
+                        stats['total_guides'] += 1
+
+                        # MM0とMM1-2の値を取得
+                        mm0 = int(guide_parts[4]) if guide_parts[4].isdigit() else 0
+                        mm1_2 = int(guide_parts[5]) if guide_parts[5].isdigit() else 0
+
+                        # Site-Specific判定 (MM0=1 and MM1-2=0 → off_target_score=1)
+                        if mm0 == 1 and mm1_2 == 0:
+                            stats['site_specific_guides'] += 1
+
+                            if classification == 'Multi':
+                                stats['site_specific_multi_target'] += 1
+                            elif classification == 'Single':
+                                stats['site_specific_single_target'] += 1
             
             return stats
             
         except Exception as e:
-            self.logger.warning(f"Guide RNA statistics calculation error: {e}")
-            return stats
+            self.logger.error(f"Guide RNA statistics calculation error: {e}")
+            raise
     
     def _parse_go_kfi_stats(self, kfi_stat_path):
         """Parse GO-KFI statistics"""
@@ -553,9 +641,9 @@ class ReportGenerator:
                 f.write(f"Protein Annotated Contigs: {stats['gene_prediction'].get('protein_count', 'N/A'):,}\n")
             
             if 'annotation' in stats:
-                f.write(f"Total Annotated Contigs: {stats['annotation'].get('total_genes', 'N/A'):,}\n")
-                f.write(f"Multi (Redundant) Contigs: {stats['annotation'].get('multi_genes', 'N/A'):,}\n")
-                f.write(f"Single (Non-Redundant) Contigs: {stats['annotation'].get('single_genes', 'N/A'):,}\n")
+                f.write(f"Total Annotated Genes: {stats['annotation'].get('total_genes', 'N/A'):,}\n")
+                f.write(f"Multi Gene Groups: {stats['annotation'].get('multi_genes', 'N/A'):,}\n")
+                f.write(f"Single Genes: {stats['annotation'].get('single_genes', 'N/A'):,}\n")
             
             if 'go_analysis' in stats:
                 go_stats = stats['go_analysis']
@@ -2069,6 +2157,16 @@ class tWhEELReport {
         
         this.init();
     }
+
+    escapeHTML(value) {
+        return String(value ?? '').replace(/[&<>"']/g, character => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#x27;'
+        })[character]);
+    }
     
     async init() {
         await this.loadData();
@@ -2294,7 +2392,9 @@ class tWhEELReport {
     showError(message) {
         const alertDiv = document.createElement('div');
         alertDiv.className = 'alert alert-danger';
-        alertDiv.innerHTML = `<strong>Error:</strong> ${message}`;
+        const label = document.createElement('strong');
+        label.textContent = 'Error:';
+        alertDiv.append(label, document.createTextNode(` ${String(message ?? '')}`));
         
         const contentBody = document.querySelector('.content-body');
         if (contentBody) {
@@ -2305,7 +2405,9 @@ class tWhEELReport {
     showSuccess(message) {
         const alertDiv = document.createElement('div');
         alertDiv.className = 'alert alert-success';
-        alertDiv.innerHTML = `<strong>Success:</strong> ${message}`;
+        const label = document.createElement('strong');
+        label.textContent = 'Success:';
+        alertDiv.append(label, document.createTextNode(` ${String(message ?? '')}`));
         
         const contentBody = document.querySelector('.content-body');
         if (contentBody) {
@@ -2345,13 +2447,13 @@ class tWhEELReport {
                     
                     return `
                         <tr>
-                            <td><span class="query-id">${gene.query_id}</span></td>
-                            <td><span class="uniprot-id">${gene.subject_id}</span></td>
-                            <td><strong>${gene.gene_name}</strong></td>
-                            <td class="description-cell" title="${gene.description}">${description}</td>
+                            <td><span class="query-id">${this.escapeHTML(gene.query_id)}</span></td>
+                            <td><span class="uniprot-id">${this.escapeHTML(gene.subject_id)}</span></td>
+                            <td><strong>${this.escapeHTML(gene.gene_name)}</strong></td>
+                            <td class="description-cell" title="${this.escapeHTML(gene.description)}">${this.escapeHTML(description)}</td>
                             <td>
-                                <span class="${classificationClass}">${gene.classification}</span><br>
-                                <small>${gene.unique_id}</small>
+                                <span class="${classificationClass}">${this.escapeHTML(gene.classification)}</span><br>
+                                <small>${this.escapeHTML(gene.unique_id)}</small>
                             </td>
                             <td><span class="${guideCountClass}">${gene.target_count}</span></td>
                         </tr>
@@ -2498,13 +2600,13 @@ class tWhEELReport {
             
             return `
                 <tr>
-                    <td><span class="query-id">${gene.query_id}</span></td>
-                    <td><span class="uniprot-id">${gene.subject_id}</span></td>
-                    <td><strong>${gene.gene_name}</strong></td>
-                    <td class="description-cell" title="${gene.description}">${description}</td>
+                    <td><span class="query-id">${this.escapeHTML(gene.query_id)}</span></td>
+                    <td><span class="uniprot-id">${this.escapeHTML(gene.subject_id)}</span></td>
+                    <td><strong>${this.escapeHTML(gene.gene_name)}</strong></td>
+                    <td class="description-cell" title="${this.escapeHTML(gene.description)}">${this.escapeHTML(description)}</td>
                     <td>
-                        <span class="${classificationClass}">${gene.classification}</span><br>
-                        <small>${gene.unique_id}</small>
+                        <span class="${classificationClass}">${this.escapeHTML(gene.classification)}</span><br>
+                        <small>${this.escapeHTML(gene.unique_id)}</small>
                     </td>
                     <td><span class="${guideCountClass}">${gene.target_count}</span></td>
                 </tr>
@@ -2721,12 +2823,12 @@ class tWhEELReport {
             
             return `
                 <tr>
-                    <td><span class="query-id">${guide.query_id}</span></td>
-                    <td><span class="reference-id">${guide.reference}</span></td>
+                    <td><span class="query-id">${this.escapeHTML(guide.query_id)}</span></td>
+                    <td><span class="reference-id">${this.escapeHTML(guide.reference)}</span></td>
                     <td>${guide.start}</td>
                     <td>${guide.end}</td>
-                    <td><span class="guide-sequence">${guide.target_sequence}</span></td>
-                    <td><span class="${strandClass}">${guide.strand}</span></td>
+                    <td><span class="guide-sequence">${this.escapeHTML(guide.target_sequence)}</span></td>
+                    <td><span class="${strandClass}">${this.escapeHTML(guide.strand)}</span></td>
                     <td><span class="${mm0Class}">${guide.mm0}</span></td>
                     <td><span class="${mm12Class}">${guide.mm1_2}</span></td>
                     <td>${guide.off_target_score.toFixed(6)}</td>
@@ -2805,19 +2907,19 @@ class tWhEELReport {
                 // Generate table rows
                 const rows = goData.map(go => {
                     const targetableClass = this.getTargetableClass(go.targetable_type);
-                    const quickgoLink = `https://www.ebi.ac.uk/QuickGO/term/${go.go_id}`;
+                    const quickgoLink = `https://www.ebi.ac.uk/QuickGO/term/${encodeURIComponent(go.go_id)}`;
                     
                     return `
                         <tr>
-                            <td><span class="go-id">${go.go_id}</span></td>
-                            <td><strong>${go.go_name || 'Loading...'}</strong></td>
-                            <td>${go.go_definition || 'Loading...'}</td>
-                            <td><a href="${quickgoLink}" target="_blank" class="btn btn-outline">QuickGO</a></td>
+                            <td><span class="go-id">${this.escapeHTML(go.go_id)}</span></td>
+                            <td><strong>${this.escapeHTML(go.go_name || 'Loading...')}</strong></td>
+                            <td>${this.escapeHTML(go.go_definition || 'Loading...')}</td>
+                            <td><a href="${quickgoLink}" target="_blank" rel="noopener noreferrer" class="btn btn-outline">QuickGO</a></td>
                             <td>${go.total_genes}</td>
                             <td>${go.genes_with_guides}</td>
                             <td>${go.kfi_score.toFixed(4)}</td>
-                            <td><span class="${targetableClass}">${go.targetable_type}</span></td>
-                            <td>${go.annotated_genes || 'Loading...'}</td>
+                            <td><span class="${targetableClass}">${this.escapeHTML(go.targetable_type)}</span></td>
+                            <td>${this.escapeHTML(go.annotated_genes || 'Loading...')}</td>
                         </tr>
                     `;
                 }).join('');
@@ -2944,34 +3046,34 @@ class tWhEELReport {
         
         const rows = currentGOData.map(go => {
             const targetableClass = this.getTargetableClass(go.targetable_type);
-            const quickgoLink = `https://www.ebi.ac.uk/QuickGO/term/${go.go_id}`;
+            const quickgoLink = `https://www.ebi.ac.uk/QuickGO/term/${encodeURIComponent(go.go_id)}`;
             
             // Create expandable genes cell
             const hasMoreGenes = go.annotated_genes && go.annotated_genes.includes('...and');
             const genesCell = hasMoreGenes ? 
-                `<td class="genes-cell expandable-genes" data-go-id="${go.go_id}" data-full-genes="${go.annotated_genes_full || go.annotated_genes}">
-                    <span class="genes-content">${go.annotated_genes}</span>
+                `<td class="genes-cell expandable-genes" data-go-id="${this.escapeHTML(go.go_id)}" data-full-genes="${this.escapeHTML(go.annotated_genes_full || go.annotated_genes)}">
+                    <span class="genes-content">${this.escapeHTML(go.annotated_genes)}</span>
                     <span class="expand-icon">📋</span>
                 </td>` :
-                `<td class="genes-cell">${go.annotated_genes || 'Loading...'}</td>`;
+                `<td class="genes-cell">${this.escapeHTML(go.annotated_genes || 'Loading...')}</td>`;
             
             // Create download button for Guide RNA CSV
             const downloadButton = go.genes_with_guides > 0 ? 
-                `<button class="btn btn-primary btn-download" onclick="window.tWheelReport.downloadGOGuideRNAs('${go.go_id}', '${go.go_name}')" title="Download Guide RNA CSV for ${go.go_id}">
+                `<button class="btn btn-primary btn-download" data-go-download-id="${this.escapeHTML(go.go_id)}" title="Download Guide RNA CSV for ${this.escapeHTML(go.go_id)}">
                     📥 CSV
                 </button>` :
                 `<span class="text-muted">No guides</span>`;
             
             return `
                 <tr>
-                    <td><span class="go-id">${go.go_id}</span></td>
-                    <td><strong>${go.go_name || 'Loading...'}</strong></td>
-                    <td>${go.go_definition || 'Loading...'}</td>
-                    <td><a href="${quickgoLink}" target="_blank" class="btn btn-outline">QuickGO</a></td>
+                    <td><span class="go-id">${this.escapeHTML(go.go_id)}</span></td>
+                    <td><strong>${this.escapeHTML(go.go_name || 'Loading...')}</strong></td>
+                    <td>${this.escapeHTML(go.go_definition || 'Loading...')}</td>
+                    <td><a href="${quickgoLink}" target="_blank" rel="noopener noreferrer" class="btn btn-outline">QuickGO</a></td>
                     <td>${go.total_genes}</td>
                     <td>${go.genes_with_guides}</td>
                     <td>${go.kfi_score.toFixed(4)}</td>
-                    <td><span class="${targetableClass}">${go.targetable_type}</span></td>
+                    <td><span class="${targetableClass}">${this.escapeHTML(go.targetable_type)}</span></td>
                     ${genesCell}
                     <td>${downloadButton}</td>
                 </tr>
@@ -2982,6 +3084,7 @@ class tWhEELReport {
         
         // Add click event listeners for expandable genes
         this.setupExpandableGenes();
+        this.setupGODownloadButtons();
         
         // Update pagination controls
         this.updateGOPaginationControls();
@@ -3103,6 +3206,18 @@ class tWhEELReport {
         
         console.log('Expandable genes setup completed');
     }
+
+    setupGODownloadButtons() {
+        document.querySelectorAll('[data-go-download-id]').forEach(button => {
+            button.addEventListener('click', () => {
+                const goId = button.dataset.goDownloadId;
+                const go = this.filteredGOData.find(item => item.go_id === goId);
+                if (go) {
+                    this.downloadGOGuideRNAs(go.go_id, go.go_name);
+                }
+            });
+        });
+    }
     
     loadGOCharts() {
         console.log('Loading GO charts...');
@@ -3139,8 +3254,8 @@ class tWhEELReport {
             const rows = parentData.map(parent => {
                 return `
                     <tr>
-                        <td><strong>${parent.parent_go}</strong></td>
-                        <td>${parent.description}</td>
+                        <td><strong>${this.escapeHTML(parent.parent_go)}</strong></td>
+                        <td>${this.escapeHTML(parent.description)}</td>
                         <td>${parent.count}</td>
                     </tr>
                 `;
@@ -3474,18 +3589,11 @@ class tWhEELReport {
             
         } catch (error) {
             console.error('Error loading protein sequences:', error);
-            this.showProteinError(`
-                <h4>プロテイン情報の表示</h4>
-                <p>軽量版のプロテインサマリーが実装されました。ヘッダー名、配列長、予測分子量が表示されます。</p>
-                <p><strong>含まれる情報:</strong></p>
-                <ul>
-                    <li>プロテインヘッダー名</li>
-                    <li>配列長（アミノ酸数）</li>
-                    <li>長さによる分類（Short: ≤100 AA, Medium: 101-999 AA, Long: ≥1000 AA）</li>
-                    <li>予測分子量（kDa）</li>
-                </ul>
-                <p>このバージョンでは配列表示はありませんが、CORSエラーなしに即座に利用できます。</p>
-            `);
+            this.showProteinError(
+                'プロテイン情報を読み込めませんでした。'
+                + 'ヘッダー名、配列長、予測分子量の埋め込みデータを'
+                + '確認してください。'
+            );
         }
     }
     
@@ -3591,12 +3699,12 @@ class tWhEELReport {
     createProteinElement(protein) {
         return `
             <div class="protein-item">
-                <div class="protein-header" data-length="${protein.category}" data-protein-id="${protein.id}">
-                    <div class="protein-id">${protein.id}</div>
+                <div class="protein-header" data-length="${this.escapeHTML(protein.category)}" data-protein-id="${this.escapeHTML(protein.id)}">
+                    <div class="protein-id">${this.escapeHTML(protein.id)}</div>
                     <div class="protein-stats">
                         <span>${protein.length} AA</span>
                         <span>${protein.mass_kda} kDa</span>
-                        <span class="category-badge category-${protein.category}">${protein.category.toUpperCase()}</span>
+                        <span class="category-badge category-${this.escapeHTML(protein.category)}">${this.escapeHTML(protein.category.toUpperCase())}</span>
                     </div>
                 </div>
             </div>
@@ -3614,9 +3722,11 @@ class tWhEELReport {
     addProteinEventListeners() {
         document.querySelectorAll('.protein-header').forEach(header => {
             header.addEventListener('click', (e) => {
-                const proteinId = header.dataset.proteinId;
-                const content = document.querySelector(`[data-protein-id="${proteinId}"].protein-content`);
+                const content = header.parentElement.querySelector(
+                    '.protein-content'
+                );
                 const toggle = header.querySelector('.expand-toggle');
+                if (!content || !toggle) return;
                 
                 if (content.classList.contains('expanded')) {
                     content.classList.remove('expanded');
@@ -3703,7 +3813,10 @@ class tWhEELReport {
     showProteinError(message) {
         const container = document.getElementById('protein-container');
         if (container) {
-            container.innerHTML = `<div class="error">${message}</div>`;
+            const errorElement = document.createElement('div');
+            errorElement.className = 'error';
+            errorElement.textContent = String(message ?? '');
+            container.replaceChildren(errorElement);
         }
     }
     
@@ -4166,6 +4279,19 @@ if (typeof module !== 'undefined' && module.exports) {
         go_analysis_data = self._load_go_data_for_js(results)
         # Load GO parent counts data for embedding
         go_parent_counts_data = self._load_go_parent_counts_data_for_js(results)
+        embedded_json = serialize_json_for_html_script({
+            'timestamp': results['timestamp'],
+            'statistics': results['statistics'],
+            'config': {
+                'input': results['config']['input'],
+                'crispr': results['config']['crispr'],
+                'busco': results['config']['busco']
+            },
+            'gene_annotation': gene_annotation_data,
+            'guide_rna': guide_rna_data,
+            'go_analysis': go_analysis_data,
+            'go_parent_counts': go_parent_counts_data
+        })
         
         html_content = f"""
 <!DOCTYPE html>
@@ -4178,19 +4304,7 @@ if (typeof module !== 'undefined' && module.exports) {
 </head>
 <body>
     <!-- Embedded Data -->
-    <script type="application/json" id="twheel-data">{json.dumps({
-        'timestamp': results['timestamp'],
-        'statistics': results['statistics'],
-        'config': {
-            'input': results['config']['input'],
-            'crispr': results['config']['crispr'],
-            'busco': results['config']['busco']
-        },
-        'gene_annotation': gene_annotation_data,
-        'guide_rna': guide_rna_data,
-        'go_analysis': go_analysis_data,
-        'go_parent_counts': go_parent_counts_data
-    }, ensure_ascii=False)}</script>
+    <script type="application/json" id="twheel-data">{embedded_json}</script>
 
     <div class="report-layout">
         <!-- Sidebar -->
@@ -4198,7 +4312,7 @@ if (typeof module !== 'undefined' && module.exports) {
             <div class="sidebar-header">
                 <img src="static/img/logo.png" alt="tWhEEL Logo">
                 <p class="subtitle">A pipeline to aggregate results from gene functional analysis, guide RNA design, and gene ontology (GO)-based knock-out feasibility assessment into a single report.</p>
-                <p class="meta">Report generated on {results['timestamp'][:19].replace('T', ' ')} UTC from the staged data in: web_data/report_sources/</p>
+                <p class="meta">Report generated on {self._escape_html(results['timestamp'][:19].replace('T', ' '))} UTC from the staged data in: web_data/report_sources/</p>
             </div>
             <nav class="sidebar-nav">
                 <ul>
@@ -4247,7 +4361,7 @@ if (typeof module !== 'undefined' && module.exports) {
                                 </thead>
                                 <tbody>
                                     <tr>
-                                        <td>Contigs</td>
+                                        <td>Counts</td>
                                         <td>{stats.get('gene_prediction', {}).get('transcript_count', 0):,}</td>
                                         <td>{stats.get('gene_prediction', {}).get('protein_count', 0):,}</td>
                                         <td>{stats.get('annotation', {}).get('total_genes', 0):,}</td>
@@ -4333,17 +4447,17 @@ if (typeof module !== 'undefined' && module.exports) {
                         <div class="stats-grid">
                             <div class="stat-card">
                                 <div class="stat-value">{stats.get('annotation', {}).get('total_genes', 0):,}</div>
-                                <div class="stat-label">Total Annotated Contigs</div>
+                                <div class="stat-label">Total Annotated Genes</div>
                             </div>
                             
                             <div class="stat-card">
                                 <div class="stat-value">{stats.get('annotation', {}).get('multi_genes', 0):,}</div>
-                                <div class="stat-label">Multi (Redundant) Contigs</div>
+                                <div class="stat-label">Multi Gene Groups</div>
                             </div>
                             
                             <div class="stat-card">
                                 <div class="stat-value">{stats.get('annotation', {}).get('single_genes', 0):,}</div>
-                                <div class="stat-label">Single (Non-Redundant) Contigs</div>
+                                <div class="stat-label">Single Genes</div>
                             </div>
                         </div>
                         <div class="filter-group">
@@ -4410,7 +4524,7 @@ if (typeof module !== 'undefined' && module.exports) {
                         <h2>Guide RNA Design</h2>
                     </div>
                     <div class="section-body">
-                        <p>CRISPR guide RNAs were designed for gene knockout using CRISPRFlash with {results['config']['crispr'].get('pam_pattern', 'NGG')}-3′ PAM motif.</p>
+                        <p>CRISPR guide RNAs were designed for gene knockout using CRISPRFlash with {self._escape_html(results['config']['crispr'].get('pam_pattern', 'NGG'))}-3′ PAM motif.</p>
 
                         <div class="stats-grid">
                             <div class="stat-card">
@@ -4644,18 +4758,18 @@ if (typeof module !== 'undefined' && module.exports) {
                             <div class="stat-card">
                                 <h3>Input Files</h3>
                                 <ul style="text-align: left; font-size: 0.85rem;">
-                                    <li><strong>Genome Assembly:</strong><br>{results['config']['input'].get('genome_assembly', 'N/A')}</li>
-                                    <li><strong>Transcriptome:</strong><br>{results['config']['input'].get('transcriptome', 'N/A')}</li>
-                                    <li><strong>Protein Database for GO Analysis:</strong><br>{results['config']['input'].get('protein_db_for_goanalysis', 'N/A')}</li>
+                                    <li><strong>Genome Assembly:</strong><br>{self._escape_html(results['config']['input'].get('genome_assembly', 'N/A'))}</li>
+                                    <li><strong>Transcriptome:</strong><br>{self._escape_html(results['config']['input'].get('transcriptome', 'N/A'))}</li>
+                                    <li><strong>Protein Database for GO Analysis:</strong><br>{self._escape_html(results['config']['input'].get('protein_db_for_goanalysis', 'N/A'))}</li>
                                 </ul>
                             </div>
                             
                             <div class="stat-card">
                                 <h3>CRISPR Settings</h3>
                                 <ul style="text-align: left; font-size: 0.85rem;">
-                                    <li><strong>PAM Pattern:</strong> {results['config']['crispr'].get('pam_pattern', 'N/A')}</li>
-                                    <li><strong>Max Mismatch:</strong> {results['config']['crispr'].get('max_mismatch', 'N/A')}</li>
-                                    <li><strong>Threads:</strong> {results['config']['crispr'].get('threads', 'N/A')}</li>
+                                    <li><strong>PAM Pattern:</strong> {self._escape_html(results['config']['crispr'].get('pam_pattern', 'N/A'))}</li>
+                                    <li><strong>Max Mismatch:</strong> {self._escape_html(results['config']['crispr'].get('max_mismatch', 'N/A'))}</li>
+                                    <li><strong>Threads:</strong> {self._escape_html(results['config']['crispr'].get('threads', 'N/A'))}</li>
                                 </ul>
                             </div>
                         </div>
@@ -4926,7 +5040,7 @@ body {{
         <div class="header">
             <h1>tWhEEL</h1>
             <p class="subtitle">transcript-aware Whole-genomic Evaluation for Editing Locus pipeline</p>
-            <p>Static Report - Generated on {results['timestamp'][:19].replace('T', ' ')}</p>
+            <p>Static Report - Generated on {self._escape_html(results['timestamp'][:19].replace('T', ' '))}</p>
         </div>
 
         <!-- Statistics -->
@@ -5005,26 +5119,26 @@ body {{
                     <div class="stat-card">
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">Input Files</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
-                            <li><strong>Genome Assembly:</strong><br>{results['config']['input'].get('genome_assembly', 'N/A')}</li>
-                            <li><strong>Transcriptome:</strong><br>{results['config']['input'].get('transcriptome', 'N/A')}</li>
-                            <li><strong>Protein Database for GO Analysis:</strong><br>{results['config']['input'].get('protein_db_for_goanalysis', 'N/A')}</li>
+                            <li><strong>Genome Assembly:</strong><br>{self._escape_html(results['config']['input'].get('genome_assembly', 'N/A'))}</li>
+                            <li><strong>Transcriptome:</strong><br>{self._escape_html(results['config']['input'].get('transcriptome', 'N/A'))}</li>
+                            <li><strong>Protein Database for GO Analysis:</strong><br>{self._escape_html(results['config']['input'].get('protein_db_for_goanalysis', 'N/A'))}</li>
                         </ul>
                     </div>
                     
                     <div class="stat-card">
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">CRISPR Settings</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
-                            <li><strong>PAM Pattern:</strong> {results['config']['crispr'].get('pam_pattern', 'N/A')}</li>
-                            <li><strong>Max Mismatch:</strong> {results['config']['crispr'].get('max_mismatch', 'N/A')}</li>
-                            <li><strong>Threads:</strong> {results['config']['crispr'].get('threads', 'N/A')}</li>
+                            <li><strong>PAM Pattern:</strong> {self._escape_html(results['config']['crispr'].get('pam_pattern', 'N/A'))}</li>
+                            <li><strong>Max Mismatch:</strong> {self._escape_html(results['config']['crispr'].get('max_mismatch', 'N/A'))}</li>
+                            <li><strong>Threads:</strong> {self._escape_html(results['config']['crispr'].get('threads', 'N/A'))}</li>
                         </ul>
                     </div>
                     
                     <div class="stat-card">
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">BUSCO Settings</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
-                            <li><strong>Lineage:</strong> {results['config']['busco'].get('lineage', 'N/A')}</li>
-                            <li><strong>CPU Count:</strong> {results['config']['busco'].get('cpu', 'N/A')}</li>
+                            <li><strong>Lineage:</strong> {self._escape_html(results['config']['busco'].get('lineage', 'N/A'))}</li>
+                            <li><strong>CPU Count:</strong> {self._escape_html(results['config']['busco'].get('cpu', 'N/A'))}</li>
                         </ul>
                     </div>
                 </div>
@@ -5043,7 +5157,7 @@ body {{
         return static_html_content
     
     def _load_gene_annotation_data(self, results):
-        """Load gene annotation data from TSV file"""
+        """Load one report row per canonical gene group from a TSV file."""
         annotation_path = self._report_data_path(
             results, 'final_annotation_guides'
         )
@@ -5053,95 +5167,39 @@ body {{
         gene_data = []
         
         try:
-            with open(annotation_path, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f, delimiter='\t')
-                header = next(reader)
-                
-                for row in reader:
-                    if len(row) >= 11:
-                        query_id = row[0]
-                        subject_id = row[1]
-                        gene_name = row[7] if len(row) > 7 else ''
-                        classification = row[8] if len(row) > 8 else ''
-                        unique_id = row[9] if len(row) > 9 else ''
-                        description = row[6] if len(row) > 6 else ''
-                        guide_targets = row[-1] if len(row) > 10 else ''
-                        
-                        # Count guide targets
-                        target_count = 0
-                        if guide_targets and guide_targets.strip():
-                            targets = guide_targets.split(',')
-                            target_count = len([t for t in targets if t.strip()])
-                        
-                        gene_data.append({
-                            'query_id': query_id,
-                            'subject_id': subject_id,
-                            'gene_name': gene_name,
-                            'classification': classification,
-                            'unique_id': unique_id,
-                            'description': description,
-                            'target_count': target_count
-                        })
+            for row in self._load_canonical_gene_rows(annotation_path):
+                gene_data.append({
+                    'query_id': row.get('query_id', ''),
+                    'subject_id': row.get('subject_id', ''),
+                    'gene_name': row.get('gene_name', ''),
+                    'classification': row['classification'],
+                    'unique_id': row['unique_id'],
+                    'description': row.get('description', ''),
+                    'target_count': len(self._split_guide_targets(
+                        row.get('guide_targets', '')
+                    )),
+                    'annotation_row_count': row['annotation_row_count'],
+                })
                         
         except Exception as e:
             self.logger.error(f"Error loading gene annotation data: {e}")
-            return []
+            raise
         
         return gene_data
     
     def _load_gene_annotation_data_for_js(self, results):
-        """Load gene annotation data for JavaScript embedding"""
-        annotation_path = self._report_data_path(
-            results, 'final_annotation_guides'
-        )
-        if not annotation_path or not os.path.exists(annotation_path):
-            return []
-        
-        gene_data = []
-        
-        try:
-            with open(annotation_path, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f, delimiter='\t')
-                header = next(reader)
-                
-                for i, row in enumerate(reader):
-                        
-                    if len(row) >= 11:
-                        query_id = row[0]
-                        subject_id = row[1]
-                        gene_name = row[7] if len(row) > 7 else ''
-                        classification = row[8] if len(row) > 8 else ''
-                        unique_id = row[9] if len(row) > 9 else ''
-                        description = row[6] if len(row) > 6 else ''
-                        guide_targets = row[-1] if len(row) > 10 else ''
-                        
-                        # Count guide targets
-                        target_count = 0
-                        if guide_targets and guide_targets.strip():
-                            targets = guide_targets.split(',')
-                            target_count = len([t for t in targets if t.strip()])
-                        
-                        # Truncate long descriptions for JSON embedding
-                        description_short = description[:200] if len(description) > 200 else description
-                        
-                        gene_data.append({
-                            'query_id': query_id,
-                            'subject_id': subject_id,
-                            'gene_name': gene_name,
-                            'classification': classification,
-                            'unique_id': unique_id,
-                            'description': description_short,
-                            'target_count': target_count
-                        })
-                        
-        except Exception as e:
-            self.logger.error(f"Error loading gene annotation data for JS: {e}")
-            return []
-        
-        return gene_data
+        """Load canonical gene annotation data for JavaScript embedding."""
+        gene_data = self._load_gene_annotation_data(results)
+        return [
+            {
+                **gene,
+                'description': gene['description'][:200],
+            }
+            for gene in gene_data
+        ]
     
     def _load_guide_rna_data_for_js(self, results):
-        """Load guide RNA data for JavaScript embedding from annotation_with_guides_final.tsv"""
+        """Load each canonical gene-guide association once for JavaScript."""
         annotation_path = self._report_data_path(
             results, 'final_annotation_guides'
         )
@@ -5151,38 +5209,28 @@ body {{
         guide_data = []
         
         try:
-            with open(annotation_path, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f, delimiter='\t')
-                header = next(reader)
-                
-                for i, row in enumerate(reader):
-                        
-                    if len(row) >= 11 and row[-1]:  # guide_targets column exists
-                        query_id = row[0]
-                        guide_targets = row[-1]
-                        
-                        # Parse guide targets - each guide becomes a separate row
-                        if guide_targets and guide_targets.strip():
-                            targets = guide_targets.split(',')
-                            for target in targets:
-                                if target.strip():
-                                    guide_parts = target.strip().split('/')
-                                    if len(guide_parts) == 8:  # Ensure we have all required fields
-                                        guide_data.append({
-                                            'query_id': query_id,
-                                            'reference': guide_parts[0],
-                                            'start': int(guide_parts[1]) if guide_parts[1].isdigit() else 0,
-                                            'end': int(guide_parts[2]) if guide_parts[2].isdigit() else 0,
-                                            'target_sequence': guide_parts[3],
-                                            'mm0': int(guide_parts[4]) if guide_parts[4].isdigit() else 0,
-                                            'mm1_2': int(guide_parts[5]) if guide_parts[5].isdigit() else 0,
-                                            'off_target_score': float(guide_parts[6]) if guide_parts[6].replace('.', '').isdigit() else 0.0,
-                                            'strand': guide_parts[7]
-                                        })
+            for row in self._load_canonical_gene_rows(annotation_path):
+                for target in self._split_guide_targets(
+                    row.get('guide_targets', '')
+                ):
+                    guide_parts = target.split('/')
+                    if len(guide_parts) == 8:
+                        guide_data.append({
+                            'query_id': row.get('query_id', ''),
+                            'unique_id': row['unique_id'],
+                            'reference': guide_parts[0],
+                            'start': int(guide_parts[1]) if guide_parts[1].isdigit() else 0,
+                            'end': int(guide_parts[2]) if guide_parts[2].isdigit() else 0,
+                            'target_sequence': guide_parts[3],
+                            'mm0': int(guide_parts[4]) if guide_parts[4].isdigit() else 0,
+                            'mm1_2': int(guide_parts[5]) if guide_parts[5].isdigit() else 0,
+                            'off_target_score': float(guide_parts[6]) if guide_parts[6].replace('.', '').isdigit() else 0.0,
+                            'strand': guide_parts[7]
+                        })
                         
         except Exception as e:
             self.logger.error(f"Error loading guide RNA data for JS: {e}")
-            return []
+            raise
         
         self.logger.info(f"Loaded {len(guide_data)} guide RNA entries for JavaScript embedding")
         return guide_data
@@ -5324,14 +5372,21 @@ body {{
             
             # Truncate long descriptions
             description = gene['description'][:100] + '...' if len(gene['description']) > 100 else gene['description']
+            query_id = self._escape_html(gene['query_id'])
+            subject_id = self._escape_html(gene['subject_id'])
+            gene_name = self._escape_html(gene['gene_name'])
+            escaped_description = self._escape_html(description)
+            description_attribute = self._escape_html(gene['description'])
+            classification = self._escape_html(gene['classification'])
+            unique_id = self._escape_html(gene['unique_id'])
             
             row = f'''
                 <tr>
-                    <td><span class="query-id">{gene['query_id']}</span></td>
-                    <td><span class="uniprot-id">{gene['subject_id']}</span></td>
-                    <td><strong>{gene['gene_name']}</strong></td>
-                    <td class="description-cell" title="{gene['description']}">{description}</td>
-                    <td><span class="{classification_class}">{gene['classification']}</span><br><small>{gene['unique_id']}</small></td>
+                    <td><span class="query-id">{query_id}</span></td>
+                    <td><span class="uniprot-id">{subject_id}</span></td>
+                    <td><strong>{gene_name}</strong></td>
+                    <td class="description-cell" title="{description_attribute}">{escaped_description}</td>
+                    <td><span class="{classification_class}">{classification}</span><br><small>{unique_id}</small></td>
                     <td><span class="{guide_count_class}">{gene['target_count']}</span></td>
                 </tr>
             '''
@@ -5596,7 +5651,7 @@ body {{
         <div class="header">
             <h1>tWhEEL</h1>
             <p class="subtitle">Transcriptome Workflow for Hierarchical Exploration and Expression Levels</p>
-            <p>Static Report - Generated on {results['timestamp'][:19].replace('T', ' ')}</p>
+            <p>Static Report - Generated on {self._escape_html(results['timestamp'][:19].replace('T', ' '))}</p>
         </div>
 
         <!-- Statistics -->
@@ -5675,26 +5730,26 @@ body {{
                     <div class="stat-card">
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">Input Files</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
-                            <li><strong>Genome Assembly:</strong><br>{results['config']['input'].get('genome_assembly', 'N/A')}</li>
-                            <li><strong>Transcriptome:</strong><br>{results['config']['input'].get('transcriptome', 'N/A')}</li>
-                            <li><strong>UniProt Database:</strong><br>{results['config']['input'].get('uniprot_db', 'N/A')}</li>
+                            <li><strong>Genome Assembly:</strong><br>{self._escape_html(results['config']['input'].get('genome_assembly', 'N/A'))}</li>
+                            <li><strong>Transcriptome:</strong><br>{self._escape_html(results['config']['input'].get('transcriptome', 'N/A'))}</li>
+                            <li><strong>UniProt Database:</strong><br>{self._escape_html(results['config']['input'].get('uniprot_db', 'N/A'))}</li>
                         </ul>
                     </div>
                     
                     <div class="stat-card">
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">CRISPR Settings</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
-                            <li><strong>PAM Pattern:</strong> {results['config']['crispr'].get('pam_pattern', 'N/A')}</li>
-                            <li><strong>Max Mismatch:</strong> {results['config']['crispr'].get('max_mismatch', 'N/A')}</li>
-                            <li><strong>Threads:</strong> {results['config']['crispr'].get('threads', 'N/A')}</li>
+                            <li><strong>PAM Pattern:</strong> {self._escape_html(results['config']['crispr'].get('pam_pattern', 'N/A'))}</li>
+                            <li><strong>Max Mismatch:</strong> {self._escape_html(results['config']['crispr'].get('max_mismatch', 'N/A'))}</li>
+                            <li><strong>Threads:</strong> {self._escape_html(results['config']['crispr'].get('threads', 'N/A'))}</li>
                         </ul>
                     </div>
                     
                     <div class="stat-card">
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">BUSCO Settings</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
-                            <li><strong>Lineage:</strong> {results['config']['busco'].get('lineage', 'N/A')}</li>
-                            <li><strong>CPU Count:</strong> {results['config']['busco'].get('cpu', 'N/A')}</li>
+                            <li><strong>Lineage:</strong> {self._escape_html(results['config']['busco'].get('lineage', 'N/A'))}</li>
+                            <li><strong>CPU Count:</strong> {self._escape_html(results['config']['busco'].get('cpu', 'N/A'))}</li>
                         </ul>
                     </div>
                 </div>

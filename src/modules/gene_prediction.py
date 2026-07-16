@@ -12,6 +12,7 @@ import gzip
 import shutil
 
 from .input_mode import EXISTING_PROTEIN_MODE, determine_protein_input_mode
+from .docker_workspace import DockerWorkspace
 
 
 class GenePrediction:
@@ -223,14 +224,15 @@ class GenePrediction:
     def get_sequence_stats(self, protein_path):
         """Retrieve statistics for the protein sequences"""
         self.logger.info("Retrieving protein sequence statistics...")
+        workspace = DockerWorkspace(self.intermediate_dir, '/seqkit_work')
         
         cmd = [
             "docker", "run",
-            "-v", f"{os.getcwd()}:{os.getcwd()}",
-            "-w", os.getcwd(),
+            "-v", workspace.volume_spec,
+            "-w", str(workspace.container_root),
             "--rm",
             "quay.io/biocontainers/seqkit:2.8.0--h9ee0642_0",
-            "seqkit", "stats", protein_path
+            "seqkit", "stats", workspace.container_path(protein_path)
         ]
         
         result = subprocess.run(cmd, capture_output=True, text=True)

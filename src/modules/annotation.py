@@ -13,6 +13,12 @@ import shutil
 
 from .fasta_search_cache import FastaSearchCache
 from .input_mode import EXISTING_PROTEIN_MODE, determine_protein_input_mode
+from .transcript_mapping import (
+    TranscriptMappingError,
+    load_mapping_file,
+    read_fasta_sequences,
+    validate_mapping_against_fastas,
+)
 
 
 class Annotation:
@@ -60,31 +66,36 @@ class Annotation:
             return None
         
         self.logger.info(f"Loading protein to transcript mapping file: {mapping_path}")
-        
-        mapping_dict = {}
-        try:
-            with open(mapping_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line or line.startswith('#'):  # 空行やコメント行をスキップ
-                        continue
-                    
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        transcript_id = parts[0].strip()
-                        protein_id = parts[1].strip()
-                        # Map protein_id to transcript_id
-                        mapping_dict[protein_id] = transcript_id
-                    else:
-                        self.logger.warning(f"Mapping file entries {line_num}: Invalid format - {line}")
-            
-            self.logger.info(f"Build the mapping dictionary: {len(mapping_dict)} entry")
-            self.protein_transcript_mapping = mapping_dict
-            return mapping_dict
-            
-        except Exception as e:
-            self.logger.error(f"Error reading the mapping file: {e}")
-            raise RuntimeError(f"Failed to read the mapping file: {mapping_path}")
+
+        mapping_dict = load_mapping_file(mapping_path)
+        self.logger.info(
+            f"Built the mapping dictionary: {len(mapping_dict)} entries"
+        )
+        self.protein_transcript_mapping = mapping_dict
+        return mapping_dict
+
+    def validate_protein_transcript_mapping(
+        self,
+        protein_fasta_path,
+        transcript_fasta_path,
+    ):
+        """Validate mapping coverage against the prepared pipeline FASTAs."""
+        if self.protein_transcript_mapping is None:
+            raise TranscriptMappingError(
+                "Protein-transcript mapping has not been loaded"
+            )
+
+        validation = validate_mapping_against_fastas(
+            self.protein_transcript_mapping,
+            protein_fasta_path,
+            transcript_fasta_path,
+        )
+        self.logger.info(
+            "Protein-transcript mapping validation completed: "
+            f"{validation['protein_count']} proteins, "
+            f"{validation['mapped_transcript_count']} mapped transcripts"
+        )
+        return validation
     
     def run_fasta_search(self, query_path, db_path):
         """Execute FASTA search"""
@@ -180,10 +191,14 @@ class Annotation:
         for line in lines:
             line = line.strip()
 
-            # Standard-format query header: "\d+>>>query_id ... - xxx aa"
-            query_match = re.match(r'^\d+>>>(.+?)\s+.+?\s+-\s+\d+\s+aa', line)
+            # The FASTA description is optional, so capture only the first
+            # whitespace-delimited identifier before the final length field.
+            query_match = re.match(
+                r'^\d+>>>(?P<query_id>\S+)(?:\s+.*?)?\s+-\s+\d+\s+aa(?:\s|$)',
+                line,
+            )
             if query_match:
-                current_query = query_match.group(1).strip()
+                current_query = query_match.group('query_id')
                 processing_hits = False
                 self.logger.debug(f"Found query: {current_query}")
                 continue
@@ -425,7 +440,6 @@ class Annotation:
         
         # Counters for annotation result statistics
         total_annotations = 0
-        excluded_count = 0
         included_count = 0
         
         # Load the annotation results using subject_id as the key
@@ -433,35 +447,59 @@ class Annotation:
         
         with open(annotation_path, 'r', encoding='utf-8') as f:
             header = f.readline().strip()
-            for line in f:
-                fields = line.strip().split('\t')
-                if len(fields) >= 7:
-                    query_id = fields[0]
-                    subject_id = fields[1]
-                    description = fields[6]
-                    
-                    total_annotations += 1
-                    
-                    # Filtering when the mapping file has been loaded in existing protein mode
+            for row_number, line in enumerate(f, 2):
+                # Preserve trailing empty fields such as an absent description.
+                annotation_line = line.rstrip('\r\n')
+                if not annotation_line:
+                    continue
+                fields = annotation_line.split('\t')
+                if len(fields) < 7:
                     if self.protein_transcript_mapping is not None:
-                        if query_id not in self.protein_transcript_mapping:
-                            # Exclude IDs that are not present in the mapping file
-                            excluded_count += 1
-                            self.logger.debug(f"Excluded ID (not found in the mapping file): {query_id}")
-                            continue
+                        raise TranscriptMappingError(
+                            "Malformed annotation row cannot be reconciled "
+                            "with the protein-transcript mapping at "
+                            f"{annotation_path}:{row_number}"
+                        )
+                    continue
+
+                query_id = fields[0]
+                subject_id = fields[1]
+                description = fields[6]
+                if (
+                    self.protein_transcript_mapping is not None
+                    and (not query_id or not subject_id)
+                ):
+                    raise TranscriptMappingError(
+                        "Annotation row has an empty query_id or subject_id "
+                        "and cannot be reconciled with the protein-transcript "
+                        f"mapping at {annotation_path}:{row_number}"
+                    )
                     
-                    # Process for analysis
-                    included_count += 1
+                total_annotations += 1
                     
-                    if subject_id not in subjects:
-                        subjects[subject_id] = []
+                # Require every mapped-mode annotation query to remain valid.
+                if self.protein_transcript_mapping is not None:
+                    if query_id not in self.protein_transcript_mapping:
+                        raise TranscriptMappingError(
+                            "Annotation query ID is absent from the "
+                            "validated protein-transcript mapping: "
+                            f"{query_id!r}. Refusing to classify this "
+                            "entry as untargetable. Rerun annotation "
+                            "with matching query and mapping inputs."
+                        )
                     
-                    subjects[subject_id].append({
-                        'query_id': query_id,
-                        'subject_id': subject_id,
-                        'description': description,
-                        'line_data': line.strip()
-                    })
+                # Process for analysis
+                included_count += 1
+                    
+                if subject_id not in subjects:
+                    subjects[subject_id] = []
+                    
+                subjects[subject_id].append({
+                    'query_id': query_id,
+                    'subject_id': subject_id,
+                    'description': description,
+                    'line_data': annotation_line,
+                })
         
         # Determine Multi/Single status based on subject_id and assign sequential unique_IDs.
         multi_counter = 1
@@ -500,16 +538,9 @@ class Annotation:
         
         # Log the filtering results and summary statistics
         if self.protein_transcript_mapping is not None:
-            self.logger.info(f"=== Mapping-based filtering results ===")
+            self.logger.info("=== Mapping-validated annotation results ===")
             self.logger.info(f"Total number of annotations: {total_annotations}")
             self.logger.info(f"Number of entries analyzed: {included_count}")
-            self.logger.info(f"Number of excluded entries: {excluded_count}")
-            if total_annotations > 0:
-                inclusion_rate = (included_count / total_annotations) * 100
-                self.logger.info(f"Analysis inclusion rate: {inclusion_rate:.2f}%")
-            
-            if excluded_count > 0:
-                self.logger.warning(f"{excluded_count} ID was excluded because it was not found in the mapping file")
         else:
             self.logger.info(f"TransDecoder mode: All {total_annotations} annotations will be included in the analysis")
         
@@ -562,14 +593,30 @@ class Annotation:
         
         # Extract sequences from the original transcriptome file
         transcriptome_path = os.path.join(self.intermediate_dir, 'transcriptome.fa')
-        
+        transcript_sequences = self._load_transcript_sequences(
+            transcriptome_path
+        )
+
+        # Validate every Single and Multi member before creating any artifact.
+        self._resolve_required_sequences(multi_genes, transcript_sequences)
+        self._resolve_required_sequences(single_genes, transcript_sequences)
+
         # Extract sequences for Multi genes and create separate files
         if multi_genes:
             multi_seq_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
-            self._extract_sequences_by_ids(transcriptome_path, multi_seq_path, multi_genes)
+            self._extract_sequences_by_ids(
+                transcriptome_path,
+                multi_seq_path,
+                multi_genes,
+                sequences=transcript_sequences,
+            )
             
             # Split multi genes into individual files
-            self._create_individual_multi_gene_files(transcriptome_path, multi_genes)
+            self._create_individual_multi_gene_files(
+                transcriptome_path,
+                multi_genes,
+                sequences=transcript_sequences,
+            )
             
             # Execute alignment process
             self._run_alignment_process(multi_genes)
@@ -577,7 +624,12 @@ class Annotation:
         # Extract sequences for Single genes
         if single_genes:
             single_seq_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
-            self._extract_sequences_by_ids(transcriptome_path, single_seq_path, single_genes)
+            self._extract_sequences_by_ids(
+                transcriptome_path,
+                single_seq_path,
+                single_genes,
+                sequences=transcript_sequences,
+            )
         
         self.logger.info("Gene sequence extraction completed successfully")
         
@@ -586,48 +638,81 @@ class Annotation:
             'single_genes': single_genes
         }
     
-    def _extract_sequences_by_ids(self, fasta_path, output_path, gene_dict):
+    @staticmethod
+    def _load_transcript_sequences(fasta_path):
+        """Load transcript sequences keyed by the first FASTA header token."""
+        return read_fasta_sequences(fasta_path, 'transcript')
+
+    def _extract_sequences_by_ids(
+        self,
+        fasta_path,
+        output_path,
+        gene_dict,
+        sequences=None,
+    ):
         """Extract sequences for specified IDs"""
-        # Load all sequences
-        sequences = {}
-        
-        with open(fasta_path, 'r') as f:
-            current_id = None
-            current_seq = ""
-            
-            for line in f:
-                line = line.strip()
-                if line.startswith('>'):
-                    if current_id and current_seq:
-                        sequences[current_id] = current_seq
-                    current_id = line[1:].split()[0]  # Retrieve only the first part
-                    current_seq = ""
-                else:
-                    current_seq += line
-            
-            # Process the last sequence
-            if current_id and current_seq:
-                sequences[current_id] = current_seq
-        
-        # Output the sequence for the specified ID
+        if sequences is None:
+            sequences = self._load_transcript_sequences(fasta_path)
+
+        resolved_sequences = self._resolve_required_sequences(
+            gene_dict, sequences
+        )
+
+        # Output the sequence for the specified ID only after every ID resolves.
         with open(output_path, 'w') as f:
             for unique_id, query_ids in gene_dict.items():
                 if isinstance(query_ids, list):
                     # For Multi gene
-                    for query_id in query_ids:
-                        sequence_id = self._resolve_sequence_id(query_id)
-                        if sequence_id and sequence_id in sequences:
-                            f.write(f">{unique_id}_{query_id}\n{sequences[sequence_id]}\n")
-                        else:
-                            self.logger.warning(f"Sequence not found (Multi): {query_id} -> {sequence_id}")
+                    for query_id, sequence_id in resolved_sequences[unique_id]:
+                        f.write(
+                            f">{unique_id}_{query_id}\n"
+                            f"{sequences[sequence_id]}\n"
+                        )
                 else:
                     # For Single gene
-                    query_id = query_ids
-                    sequence_id = self._resolve_sequence_id(query_id)
-                    if sequence_id and sequence_id in sequences:
-                        f.write(f">{unique_id}\n{sequences[sequence_id]}\n")
-                    else:
-                        self.logger.warning(f"Sequence not found (Single): {query_id} -> {sequence_id}")
+                    _, sequence_id = resolved_sequences[unique_id][0]
+                    f.write(f">{unique_id}\n{sequences[sequence_id]}\n")
+
+    def _resolve_required_sequences(self, gene_dict, sequences):
+        """Resolve every classified query before publishing sequence FASTAs."""
+        resolved = {}
+        missing = []
+
+        for unique_id, query_ids in gene_dict.items():
+            query_id_list = (
+                query_ids if isinstance(query_ids, list) else [query_ids]
+            )
+            resolved[unique_id] = []
+            for query_id in query_id_list:
+                sequence_id = self._resolve_sequence_id(query_id)
+                if sequence_id not in sequences:
+                    missing.append(f"{query_id}->{sequence_id}")
+                    continue
+                resolved[unique_id].append((query_id, sequence_id))
+
+        if missing:
+            examples = ', '.join(missing[:5])
+            if len(missing) > 5:
+                examples += f", ... (+{len(missing) - 5})"
+            if self.protein_transcript_mapping is not None:
+                corrective_action = (
+                    "correct the protein-transcript mapping and rerun "
+                    "annotation"
+                )
+            else:
+                corrective_action = (
+                    "verify that query.pep uses TransDecoder-style "
+                    "<transcript_id>.p<number> identifiers matching "
+                    "transcriptome.fa, then rerun gene prediction and annotation"
+                )
+            raise TranscriptMappingError(
+                "Classified protein query ID(s) could not be resolved to "
+                "transcriptome FASTA records: "
+                f"{examples}. Refusing to create incomplete gene FASTAs; "
+                f"{corrective_action}."
+            )
+
+        return resolved
     
     def _resolve_sequence_id(self, query_id):
         """
@@ -643,18 +728,20 @@ class Annotation:
             str: The ID actually used in the FASTA file, or None
         """
         # If a mapping file has been loaded
-        if self.protein_transcript_mapping:
+        if self.protein_transcript_mapping is not None:
             # protein_id -> transcript_id Attempt the mapping
             if query_id in self.protein_transcript_mapping:
                 transcript_id = self.protein_transcript_mapping[query_id]
                 self.logger.debug(f"Apply the mapping: {query_id} -> {transcript_id}")
                 return transcript_id
-            else:
-                self.logger.debug(f"Mapping not found: {query_id}")
+            raise TranscriptMappingError(
+                "Protein query ID is absent from the loaded "
+                f"protein-transcript mapping: {query_id!r}"
+            )
         
         # Conventional processing when no mapping is available
         # Remove suffixes such as .p1 from query_id and use the result as the transcript ID
-        base_id = query_id.split('.p')[0] if '.p' in query_id else query_id
+        base_id = re.sub(r'\.p\d+$', '', query_id)
         self.logger.debug(f"従来の処理適用: {query_id} -> {base_id}")
         return base_id
     
@@ -674,50 +761,29 @@ class Annotation:
             
             if not mapping_path or not mapping_path.strip():
                 raise ValueError(
-                    "In existing protein mode, the protein_transcript_mapping parameter is required"
-                    "Please specify the protein ID–to–transcript ID mapping file"
+                    "In existing protein mode, input.protein_transcript_mapping "
+                    "is required. Specify a headerless "
+                    "transcript_id<TAB>protein_id mapping file."
                 )
             
             if not os.path.exists(mapping_path):
                 raise FileNotFoundError(
                     f"The specified mapping file was not found: {mapping_path}\n"
-                    f"In existing protein mode, a protein_transcript_mapping file is required"
+                    "Existing protein mode requires a readable "
+                    "input.protein_transcript_mapping file."
                 )
-            
-            # Basic validation of the file format
-            try:
-                with open(mapping_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()[:10]  # Check the first 10 lines
-                    
-                valid_lines = 0
-                for line_num, line in enumerate(lines, 1):
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        valid_lines += 1
-                    else:
-                        self.logger.warning(f"Mapping file line {line_num}: The file may not be in TSV format - {line}")
-                
-                if valid_lines == 0:
-                    raise ValueError(
-                        f"No valid data found in the mapping file: {mapping_path}\n"
-                        f"Please ensure that the file is tab-delimited (TSV format)。"
-                    )
-                
-                self.logger.info(f"Mapping file format validation completed: {valid_lines} Valid entries detected")
-                    
-            except Exception as e:
-                raise RuntimeError(f"Failed to load or validate the mapping file: {mapping_path}\nError: {e}")
             
         else:
             self.logger.info("Use TransDecoder mode (no mapping file required)")
 
         return input_mode
     
-    def _create_individual_multi_gene_files(self, transcriptome_path, multi_genes):
+    def _create_individual_multi_gene_files(
+        self,
+        transcriptome_path,
+        multi_genes,
+        sequences=None,
+    ):
         """Split multi genes into individual files"""
         self.logger.info("Split multi genes into individual files中...")
         
@@ -725,37 +791,23 @@ class Annotation:
         multi_genes_dir = os.path.join(self.intermediate_dir, 'multi_genes')
         Path(multi_genes_dir).mkdir(parents=True, exist_ok=True)
         
-        # Load all sequences
-        sequences = {}
-        with open(transcriptome_path, 'r') as f:
-            current_id = None
-            current_seq = ""
-            
-            for line in f:
-                line = line.strip()
-                if line.startswith('>'):
-                    if current_id and current_seq:
-                        sequences[current_id] = current_seq
-                    current_id = line[1:].split()[0]  # Retrieve only the first part
-                    current_seq = ""
-                else:
-                    current_seq += line
-            
-            # Process the last sequence
-            if current_id and current_seq:
-                sequences[current_id] = current_seq
-        
+        if sequences is None:
+            sequences = self._load_transcript_sequences(transcriptome_path)
+
+        resolved_sequences = self._resolve_required_sequences(
+            multi_genes, sequences
+        )
+
         # Create a separate file for each Multi gene
         for unique_id, query_ids in multi_genes.items():
             output_file = os.path.join(multi_genes_dir, f"{unique_id}.fa")
             
             with open(output_file, 'w') as f:
-                for query_id in query_ids:
-                    sequence_id = self._resolve_sequence_id(query_id)
-                    if sequence_id and sequence_id in sequences:
-                        f.write(f">{unique_id}_{query_id}\n{sequences[sequence_id]}\n")
-                    else:
-                        self.logger.warning(f"Sequence not found (individual Multi gene): {query_id} -> {sequence_id}")
+                for query_id, sequence_id in resolved_sequences[unique_id]:
+                    f.write(
+                        f">{unique_id}_{query_id}\n"
+                        f"{sequences[sequence_id]}\n"
+                    )
             
             self.logger.debug(f"Create individual files for Multi genes: {output_file}")
         
@@ -859,10 +911,21 @@ class Annotation:
                 raise FileNotFoundError(f"Predicted protein sequence file not found: {query_path}")
             
             # Input validation: Check the mapping file requirement for existing protein mode
-            self._validate_existing_protein_mode_requirements()
-            
-            # Load the protein-to-transcript mapping file
-            self.load_protein_transcript_mapping()
+            input_mode = self._validate_existing_protein_mode_requirements()
+
+            transcriptome_path = os.path.join(
+                self.intermediate_dir, 'transcriptome.fa'
+            )
+            if input_mode == EXISTING_PROTEIN_MODE:
+                # Validate the exact staged inputs before the expensive search.
+                self.load_protein_transcript_mapping()
+                self.validate_protein_transcript_mapping(
+                    query_path,
+                    transcriptome_path,
+                )
+            else:
+                # A configured mapping belongs only to existing protein mode.
+                self.protein_transcript_mapping = None
             
             # Prepare protein database for GO analysis
             db_path = self.prepare_protein_db_for_goanalysis()

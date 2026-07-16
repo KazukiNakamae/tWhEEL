@@ -9,5 +9,6 @@ WORKDIR /app
 
 # ---- copy scripts ----
 COPY count_go_parent_terms.py .
+COPY go_slim_mapping.py .
 
 ENTRYPOINT ["python", "count_go_parent_terms.py"]

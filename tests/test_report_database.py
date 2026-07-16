@@ -552,6 +552,157 @@ class ReportDatabaseTests(unittest.TestCase):
             self.assertNotIn('const rows = guideData.map', javascript)
             self.assertIn('this.setupGuideTableFilters(guideData);', javascript)
 
+    def test_multi_gene_contig_rows_are_counted_once_in_report_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            annotation_path = temp_dir / 'annotation_classified.txt'
+            final_guides_path = temp_dir / 'annotation_with_guides_final.tsv'
+            header = [
+                'query_id', 'subject_id', 'identity', 'alignment_length',
+                'evalue', 'bit_score', 'description', 'gene_name',
+                'classification', 'unique_id',
+            ]
+            annotation_rows = [
+                [
+                    'contig_a', 'subject_multi', '99.0', '100', '1e-20',
+                    '200', 'multi description', 'MULTI', 'Multi', 'Multi_1',
+                ],
+                [
+                    'contig_b', 'subject_multi', '98.0', '90', '1e-18',
+                    '180', 'multi description', 'MULTI', 'Multi', 'Multi_1',
+                ],
+                [
+                    'contig_c', 'subject_single', '97.0', '80', '1e-16',
+                    '160', 'single description', 'SINGLE', 'Single',
+                    'Single_1',
+                ],
+            ]
+            annotation_path.write_text(
+                '\n'.join(
+                    '\t'.join(row) for row in [header, *annotation_rows]
+                ) + '\n',
+                encoding='utf-8',
+            )
+
+            multi_guide_a = (
+                'Multi_1/10/33/MULTI_GUIDE_A/1/0/1.0/+'
+            )
+            multi_guide_b = (
+                'Multi_1/20/43/MULTI_GUIDE_B/1/0/1.0/-'
+            )
+            single_guide = (
+                'Single_1/30/53/SINGLE_GUIDE/1/0/1.0/+'
+            )
+            final_rows = [
+                [*annotation_rows[0], ','.join([
+                    multi_guide_a, multi_guide_b, multi_guide_a,
+                ])],
+                [*annotation_rows[1], ','.join([
+                    multi_guide_b, multi_guide_a,
+                ])],
+                [*annotation_rows[2], single_guide],
+            ]
+            final_guides_path.write_text(
+                '\n'.join(
+                    '\t'.join(row)
+                    for row in [[*header, 'guide_targets'], *final_rows]
+                ) + '\n',
+                encoding='utf-8',
+            )
+
+            results = self._results(
+                config,
+                annotation_table=annotation_path,
+                final_annotation_guides=final_guides_path,
+            )
+            generator = ReportGenerator(config)
+
+            stats = generator._collect_statistics(results)
+            gene_data = generator._load_gene_annotation_data(results)
+            js_gene_data = generator._load_gene_annotation_data_for_js(
+                results
+            )
+            guide_data = generator._load_guide_rna_data_for_js(results)
+
+            self.assertEqual(stats['annotation'], {
+                'multi_genes': 1,
+                'single_genes': 1,
+                'total_genes': 2,
+            })
+            self.assertEqual(stats['guide_design']['total_guides'], 3)
+            self.assertEqual(
+                stats['guide_design']['site_specific_guides'], 3
+            )
+            self.assertEqual(
+                stats['guide_design']['site_specific_multi_target'], 2
+            )
+            self.assertEqual(
+                stats['guide_design']['site_specific_single_target'], 1
+            )
+
+            self.assertEqual(len(gene_data), 2)
+            self.assertEqual(len(js_gene_data), 2)
+            multi_gene = next(
+                gene for gene in gene_data
+                if gene['unique_id'] == 'Multi_1'
+            )
+            self.assertEqual(multi_gene['query_id'], 'contig_a; contig_b')
+            self.assertEqual(multi_gene['annotation_row_count'], 2)
+            self.assertEqual(multi_gene['target_count'], 2)
+
+            self.assertEqual(len(guide_data), 3)
+            self.assertEqual(
+                len({
+                    (guide['unique_id'], guide['reference'], guide['start'],
+                     guide['end'], guide['target_sequence'], guide['strand'])
+                    for guide in guide_data
+                }),
+                3,
+            )
+            self.assertEqual(
+                {
+                    guide['query_id']
+                    for guide in guide_data
+                    if guide['unique_id'] == 'Multi_1'
+                },
+                {'contig_a; contig_b'},
+            )
+
+    def test_conflicting_rows_for_one_gene_group_fail_report_generation(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            annotation_path = temp_dir / 'annotation_classified.txt'
+            annotation_path.write_text(
+                '\t'.join([
+                    'query_id', 'subject_id', 'identity',
+                    'alignment_length', 'evalue', 'bit_score',
+                    'description', 'gene_name', 'classification',
+                    'unique_id',
+                ])
+                + '\n'
+                + '\t'.join([
+                    'contig_a', 'subject_a', '99.0', '100', '1e-20',
+                    '200', 'description', 'GENE', 'Multi', 'Multi_1',
+                ])
+                + '\n'
+                + '\t'.join([
+                    'contig_b', 'subject_b', '98.0', '90', '1e-18',
+                    '180', 'description', 'GENE', 'Multi', 'Multi_1',
+                ])
+                + '\n',
+                encoding='utf-8',
+            )
+            generator = ReportGenerator(config)
+
+            with self.assertRaisesRegex(
+                ValueError, 'conflicting subject_id values'
+            ):
+                generator._collect_statistics(self._results(
+                    config, annotation_table=annotation_path
+                ))
+
     def test_new_generation_prunes_missing_optional_images(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)

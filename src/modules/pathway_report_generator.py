@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .report_source_store import ReportSourceStore
+from .report_generator import serialize_json_for_html_script
 
 
 try:
@@ -657,14 +658,14 @@ class PathwayReportGenerator:
                 # 代謝物ノード（四角形）
                 svg_parts.append(
                     f'<rect x="{x - width/2}" y="{y - height/2}" width="{width}" height="{height}" '
-                    f'class="metabolite-node" title="{label}" />'
+                    f'class="metabolite-node" title="{escaped_label}" />'
                 )
             
             else:
                 # その他のノード（四角形、グレー）
                 svg_parts.append(
                     f'<rect x="{x - width/2}" y="{y - height/2}" width="{width}" height="{height}" '
-                    f'fill="#e9ecef" stroke="#adb5bd" stroke-width="1" title="{label}" />'
+                    f'fill="#e9ecef" stroke="#adb5bd" stroke-width="1" title="{escaped_label}" />'
                 )
             
             # ラベルテキスト
@@ -879,6 +880,26 @@ class PathwayReportGenerator:
         if len(source_xref_keys) != len(set(source_xref_keys)):
             raise ValueError(
                 f'Duplicate source xrefs in canonical gene {gene_key}'
+            )
+
+        ensembl_xref_ids = {
+            xref['gene_id']
+            for xref in xrefs
+            if xref['database'] == 'Ensembl'
+        }
+        annotation_ensembl_id = str(
+            gene.get('ensembl_id', '') or ''
+        ).strip()
+        if (
+            ensembl_xref_ids
+            and annotation_ensembl_id
+            and annotation_ensembl_id not in ensembl_xref_ids
+        ):
+            raise ValueError(
+                'Annotation Ensembl identifier does not reconcile with '
+                f'pathway xrefs for {pathway_id}: {gene_key}; '
+                f'annotation={annotation_ensembl_id}, '
+                f'pathway={sorted(ensembl_xref_ids)}'
             )
 
         node_occurrence_count = sum(
@@ -1550,64 +1571,22 @@ class PathwayReportGenerator:
                 'unique_xref_count': int(
                     pathway.get('unique_xref_count', 0) or 0
                 ),
-                'matched_genes': str(pathway.get('matched_genes', 0)),
                 'genes_with_guides': int(pathway.get('genes_with_guides', 0)),
                 'pw_kfi_score': float(pathway.get('pw_kfi_score', 0)),
                 'targetable_type': pathway.get('targetable_type', 'Not targetable'),
                 'coverage_rate': float(pathway.get('coverage_rate', 0))
             })
         
-        # パスウェイ-遺伝子マッピングデータを準備
-        pathway_genes_data = {}
-        if pathway_genes:
-            for pathway_id, genes in pathway_genes.items():
-                pathway_genes_data[pathway_id] = []
-                for gene in genes:
-                    pathway_genes_data[pathway_id].append({
-                        'pathway_gene_database': gene.get(
-                            'pathway_gene_database', ''
-                        ),
-                        'pathway_gene_id': gene.get('pathway_gene_id', ''),
-                        'gene_key': gene.get('gene_key', ''),
-                        'pw_kfi_gene_key': gene.get('pw_kfi_gene_key', ''),
-                        'pathway_xrefs': gene.get('pathway_xrefs', ''),
-                        'source_databases': gene.get('source_databases', ''),
-                        'node_occurrence_count': int(
-                            gene.get('node_occurrence_count', 0) or 0
-                        ),
-                        'unique_xref_count': int(
-                            gene.get('unique_xref_count', 0) or 0
-                        ),
-                        'canonical_subject_id': gene.get(
-                            'canonical_subject_id', ''
-                        ),
-                        'annotation_source_database': gene.get(
-                            'annotation_source_database', ''
-                        ),
-                        'matched_annotation_key': gene.get(
-                            'matched_annotation_key', ''
-                        ),
-                        'matched_annotation_id': gene.get(
-                            'matched_annotation_id', ''
-                        ),
-                        'resolved_annotation_subject_id': gene.get(
-                            'resolved_annotation_subject_id', ''
-                        ),
-                        'match_method': gene.get('match_method', ''),
-                        'sgd_id': gene.get('sgd_id', ''),
-                        'ensembl_id': gene.get('ensembl_id', ''),
-                        'gene_sgd_id': gene.get('gene_sgd_id', ''),
-                        'unique_id': gene.get('unique_id', ''),
-                        'gene_name': gene.get('gene_name', ''),
-                        'has_guides': str(gene.get('has_guides', 'False')).lower() == 'true',
-                        'guide_count': int(gene.get('guide_count', 0))
-                    })
-        
-        # データをJSON形式で埋め込み
+        # Keep the standalone HTML self-contained without serializing the
+        # large guide and SVG payloads again inside ``summary``. Canonical gene
+        # details used by the browser already live in ``pathway_svgs`` and
+        # ``pathway_guide_data``; the raw mapping rows are report inputs only.
         embedded_data = {
-            'summary': summary_data,
+            'summary': {
+                'timestamp': summary_data.get('timestamp', ''),
+                'statistics': summary_data.get('statistics', {}),
+            },
             'pathways': pathway_table_data,
-            'pathway_genes': pathway_genes_data,
             'pathway_guide_data': summary_data.get('pathway_guide_data', {}),
             'pathway_svgs': summary_data.get('pathway_svgs', {})
         }
@@ -2001,7 +1980,7 @@ class PathwayReportGenerator:
 </head>
 <body>
     <!-- データ埋め込み -->
-    <script type="application/json" id="pathway-data">{json.dumps(embedded_data, ensure_ascii=False, indent=2)}</script>
+    <script type="application/json" id="pathway-data">{serialize_json_for_html_script(embedded_data)}</script>
     
     <div class="report-layout">
         <!-- Sidebar -->
@@ -2009,7 +1988,7 @@ class PathwayReportGenerator:
             <div class="sidebar-header">
                 <img src="static/img/logo.png" alt="tWhEEL Logo">
                 <p class="subtitle">A pipeline to aggregate results from gene functional analysis, guide RNA design, and pathway-based knock-out feasibility assessment into a single report.</p>
-                <p class="meta">Report generated on {summary_data.get('timestamp', '')}</p>
+                <p class="meta">Report generated on {html.escape(str(summary_data.get('timestamp', '')), quote=True)}</p>
             </div>
             <nav class="sidebar-nav">
                 <ul>
@@ -2196,10 +2175,87 @@ class PathwayReportGenerator:
     <script>
         let pathwayData = [];
         let filteredData = [];
+        let pathwayReportData = null;
         let currentPage = 1;
         const itemsPerPage = 25;
         let sortColumn = 0;
         let sortDirection = 'asc';
+
+        function appendTextCell(row, value) {{
+            const cell = row.insertCell();
+            cell.textContent = String(value ?? '');
+            return cell;
+        }}
+
+        function getPathwayReportData() {{
+            if (pathwayReportData !== null) {{
+                return pathwayReportData;
+            }}
+            const dataElement = document.getElementById('pathway-data');
+            if (!dataElement) {{
+                throw new Error('Embedded data not found.');
+            }}
+            pathwayReportData = JSON.parse(dataElement.textContent);
+            return pathwayReportData;
+        }}
+
+        function validatedSVGMarkup(markup) {{
+            const documentObject = new DOMParser().parseFromString(
+                String(markup ?? ''), 'image/svg+xml'
+            );
+            const root = documentObject.documentElement;
+            const allowedElements = new Set([
+                'svg', 'defs', 'style', 'path', 'ellipse', 'rect', 'text', 'g'
+            ]);
+            const allowedAttributes = new Set([
+                'width', 'height', 'viewbox', 'xmlns', 'd', 'class',
+                'cx', 'cy', 'rx', 'ry', 'x', 'y', 'fill', 'stroke',
+                'stroke-width', 'opacity', 'id', 'font-weight', 'font-size',
+                'data-gene-database', 'data-gene-id', 'data-gene-key',
+                'data-sgd-id', 'data-gene-name', 'title'
+            ]);
+            if (
+                !root
+                || root.localName !== 'svg'
+                || documentObject.querySelector('parsererror')
+            ) {{
+                throw new Error('Invalid embedded pathway SVG');
+            }}
+            for (const element of documentObject.querySelectorAll('*')) {{
+                if (!allowedElements.has(element.localName)) {{
+                    throw new Error(
+                        `Forbidden embedded SVG element: ${{element.localName}}`
+                    );
+                }}
+                for (const attribute of [...element.attributes]) {{
+                    const name = attribute.name.toLowerCase();
+                    if (!allowedAttributes.has(name)) {{
+                        throw new Error(
+                            `Forbidden embedded SVG attribute: ${{name}}`
+                        );
+                    }}
+                    if (
+                        (name === 'fill' || name === 'stroke')
+                        && !/^(?:#[0-9a-f]{{3,8}}|none|white)$/i.test(
+                            attribute.value
+                        )
+                    ) {{
+                        throw new Error(
+                            `Forbidden embedded SVG paint value: ${{attribute.value}}`
+                        );
+                    }}
+                }}
+                if (
+                    element.localName === 'style'
+                    && /(?:url\\s*\\(|@import|expression\\s*\\(|javascript:)/i.test(
+                        element.textContent || ''
+                    )
+                ) {{
+                    throw new Error('Forbidden embedded SVG stylesheet');
+                }}
+            }}
+            return new XMLSerializer().serializeToString(root);
+        }}
         
         // 初期化
         document.addEventListener('DOMContentLoaded', function() {{
@@ -2214,13 +2270,7 @@ class PathwayReportGenerator:
         
         function loadPathwayData() {{
             try {{
-                // 埋め込まれたデータを読み込み
-                const dataElement = document.getElementById('pathway-data');
-                if (!dataElement) {{
-                    throw new Error('Embedded data not found.');
-                }}
-                
-                const data = JSON.parse(dataElement.textContent);
+                const data = getPathwayReportData();
                 
                 // サマリーデータを表示
                 loadPathwaySummary(data.summary);
@@ -2463,25 +2513,44 @@ class PathwayReportGenerator:
             
             paginatedData.forEach(pathway => {{
                 const row = tbody.insertRow();
-                const targetableClass = pathway.targetable_type.toLowerCase().replace(' ', '-');
-                
-                row.innerHTML = `
-                    <td>${{pathway.pathway_id}}</td>
-                    <td>${{pathway.pathway_name}}</td>
-                    <td>${{pathway.total_gene_nodes}}</td>
-                    <td>${{pathway.evaluable_gene_nodes}}</td>
-                    <td>${{pathway.unique_xref_count}}</td>
-                    <td>${{pathway.total_genes}}</td>
-                    <td>${{pathway.genes_with_guides}}</td>
-                    <td>${{pathway.pw_kfi_score.toFixed(3)}}</td>
-                    <td class="targetable-${{targetableClass}}">${{pathway.targetable_type}}</td>
-                    <td>${{(pathway.coverage_rate * 100).toFixed(1)}}%</td>
-                    <td>
-                        <button class="btn secondary" onclick="showPathwayGenes('${{pathway.pathway_id}}')">View Genes</button>
-                        <button class="btn" onclick="showPathwayDiagram('${{pathway.pathway_id}}')">🔍 View Pathway</button>
-                        <button class="btn" onclick="downloadPathwayGuides('${{pathway.pathway_id}}')">📥 Guides</button>
-                    </td>
-                `;
+                appendTextCell(row, pathway.pathway_id);
+                appendTextCell(row, pathway.pathway_name);
+                appendTextCell(row, pathway.total_gene_nodes);
+                appendTextCell(row, pathway.evaluable_gene_nodes);
+                appendTextCell(row, pathway.unique_xref_count);
+                appendTextCell(row, pathway.total_genes);
+                appendTextCell(row, pathway.genes_with_guides);
+                appendTextCell(row, pathway.pw_kfi_score.toFixed(3));
+                const targetableCell = appendTextCell(
+                    row, pathway.targetable_type
+                );
+                const targetableClasses = {{
+                    'Fully targetable': 'targetable-fully',
+                    'Partially targetable': 'targetable-partially',
+                    'Not targetable': 'targetable-not'
+                }};
+                targetableCell.className = (
+                    targetableClasses[pathway.targetable_type]
+                    || 'targetable-not'
+                );
+                appendTextCell(
+                    row, `${{(pathway.coverage_rate * 100).toFixed(1)}}%`
+                );
+                const actionsCell = row.insertCell();
+                const actions = [
+                    ['btn secondary', 'View Genes', showPathwayGenes],
+                    ['btn', '🔍 View Pathway', showPathwayDiagram],
+                    ['btn', '📥 Guides', downloadPathwayGuides]
+                ];
+                actions.forEach(([className, label, handler]) => {{
+                    const button = document.createElement('button');
+                    button.className = className;
+                    button.textContent = label;
+                    button.addEventListener(
+                        'click', () => handler(pathway.pathway_id)
+                    );
+                    actionsCell.appendChild(button);
+                }});
             }});
             
             renderPagination();
@@ -2578,8 +2647,7 @@ class PathwayReportGenerator:
         function showPathwayGenes(pathwayId) {{
             try {{
                 // Retrieve pathway SVG information from embedded data
-                const dataElement = document.getElementById('pathway-data');
-                const data = JSON.parse(dataElement.textContent);
+                const data = getPathwayReportData();
                 const pathwaySvgData = data.pathway_svgs[pathwayId];
                 
                 if (!pathwaySvgData || !pathwaySvgData.guide_status_map) {{
@@ -2634,36 +2702,67 @@ class PathwayReportGenerator:
                         }}
                         
                         const row = tbody.insertRow();
-                        row.innerHTML = `
-                            <td><strong>${{geneName}}</strong></td>
-                            <td>${{pathwayDatabase}}</td>
-                            <td style="font-family: monospace; background: #f8f9fa;">${{pathwayGeneId}}</td>
-                            <td>${{nodeOccurrenceCount}}</td>
-                            <td>${{annotationSource}}</td>
-                            <td title="${{description}}">${{
-                                description && description.length > 40 ? 
-                                description.substring(0, 40) + '...' : 
-                                description
-                            }}</td>
-                            <td>${{matchStatus}}</td>
-                            <td style="font-family: monospace;">${{failureReason || '—'}}</td>
-                            <td>
-                                ${{matchStatus === 'matched' ? `
-                                    <span style="color: ${{hasGuides ? '#28a745' : '#dc3545'}}; font-weight: bold;">
-                                        ${{hasGuides ? '✓ Available' : '✗ Not Available'}}
-                                    </span>
-                                    ${{hasGuides ? ` (${{geneInfo.guide_count}} guides)` : ''}}
-                                ` : '<span style="color: #6c757d; font-weight: bold;">Unavailable</span>'}}
-                            </td>
-                            <td>
-                                ${{geneInfo.sgd_id ? `
-                                    <button class="btn secondary" onclick="openSgdLink('${{geneInfo.sgd_id}}')"
-                                        title="Open verified SGD annotation">
-                                        🔗 View SGD annotation
-                                    </button>
-                                ` : '<span title="No verified external URL is configured">Unavailable</span>'}}
-                            </td>
-                        `;
+                        const nameCell = row.insertCell();
+                        const nameElement = document.createElement('strong');
+                        nameElement.textContent = String(geneName);
+                        nameCell.appendChild(nameElement);
+                        appendTextCell(row, pathwayDatabase);
+                        const idCell = appendTextCell(row, pathwayGeneId);
+                        idCell.style.fontFamily = 'monospace';
+                        idCell.style.background = '#f8f9fa';
+                        appendTextCell(row, nodeOccurrenceCount);
+                        appendTextCell(row, annotationSource);
+                        const descriptionCell = appendTextCell(
+                            row,
+                            description && description.length > 40
+                                ? description.substring(0, 40) + '...'
+                                : description
+                        );
+                        descriptionCell.title = String(description ?? '');
+                        appendTextCell(row, matchStatus);
+                        const reasonCell = appendTextCell(
+                            row, failureReason || '—'
+                        );
+                        reasonCell.style.fontFamily = 'monospace';
+
+                        const statusCell = row.insertCell();
+                        const statusElement = document.createElement('span');
+                        statusElement.style.fontWeight = 'bold';
+                        if (matchStatus === 'matched') {{
+                            statusElement.style.color = hasGuides
+                                ? '#28a745' : '#dc3545';
+                            statusElement.textContent = hasGuides
+                                ? '✓ Available' : '✗ Not Available';
+                            statusCell.appendChild(statusElement);
+                            if (hasGuides) {{
+                                statusCell.appendChild(document.createTextNode(
+                                    ` (${{geneInfo.guide_count}} guides)`
+                                ));
+                            }}
+                        }} else {{
+                            statusElement.style.color = '#6c757d';
+                            statusElement.textContent = 'Unavailable';
+                            statusCell.appendChild(statusElement);
+                        }}
+
+                        const linkCell = row.insertCell();
+                        if (geneInfo.sgd_id) {{
+                            const linkButton = document.createElement('button');
+                            linkButton.className = 'btn secondary';
+                            linkButton.title = 'Open verified SGD annotation';
+                            linkButton.textContent = '🔗 View SGD annotation';
+                            linkButton.addEventListener(
+                                'click', () => openSgdLink(geneInfo.sgd_id)
+                            );
+                            linkCell.appendChild(linkButton);
+                        }} else {{
+                            const unavailable = document.createElement('span');
+                            unavailable.title = (
+                                'No verified external URL is configured'
+                            );
+                            unavailable.textContent = 'Unavailable';
+                            linkCell.appendChild(unavailable);
+                        }}
                     }});
                     
                     // 統計情報を追加
@@ -2688,21 +2787,33 @@ class PathwayReportGenerator:
                         ? ((genesWithGuides / totalGenes) * 100).toFixed(1)
                         : '0.0';
                     
-                    statsRow.innerHTML = `
-                        <td colspan="10" style="text-align: center; padding: 1rem;">
-                            <strong>統計情報:</strong> 
-                            ${{totalGeneNodes}} total GPML gene nodes,
-                            ${{evaluableGeneNodes}} evaluable nodes,
-                            ${{uniqueXrefCount}} unique Database::ID xrefs,
-                            ${{totalGenes}} unique PW-KFI genes,
-                            ${{genesWithGuides}} PW-KFI genes with guide RNA targets,
-                            ${{geneNodesWithGuides}} colored GPML nodes
-                            (${{coverage}}% PW-KFI gene coverage)
-                            ${{unrenderableRecords.length > 0
-                                ? `<br>${{unrenderableRecords.length}} nodes cannot be keyed for diagram lookup: ${{unrenderableReasons}}`
-                                : ''}}
-                        </td>
-                    `;
+                    const statsCell = statsRow.insertCell();
+                    statsCell.colSpan = 10;
+                    statsCell.style.textAlign = 'center';
+                    statsCell.style.padding = '1rem';
+                    const statsLabel = document.createElement('strong');
+                    statsLabel.textContent = '統計情報:';
+                    statsCell.append(
+                        statsLabel,
+                        document.createTextNode(
+                            ` ${{totalGeneNodes}} total GPML gene nodes, `
+                            + `${{evaluableGeneNodes}} evaluable nodes, `
+                            + `${{uniqueXrefCount}} unique Database::ID xrefs, `
+                            + `${{totalGenes}} unique PW-KFI genes, `
+                            + `${{genesWithGuides}} PW-KFI genes with guide RNA targets, `
+                            + `${{geneNodesWithGuides}} colored GPML nodes `
+                            + `(${{coverage}}% PW-KFI gene coverage)`
+                        )
+                    );
+                    if (unrenderableRecords.length > 0) {{
+                        statsCell.append(
+                            document.createElement('br'),
+                            document.createTextNode(
+                                `${{unrenderableRecords.length}} nodes cannot `
+                                + `be keyed for diagram lookup: ${{unrenderableReasons}}`
+                            )
+                        );
+                    }}
                 }}
                 
                 // モーダルを表示
@@ -2716,8 +2827,11 @@ class PathwayReportGenerator:
         
         function openSgdLink(sgdId) {{
             if (sgdId && sgdId !== 'N/A') {{
-                const sgdUrl = `https://www.yeastgenome.org/locus/${{sgdId}}`;
-                window.open(sgdUrl, '_blank');
+                const sgdUrl = (
+                    'https://www.yeastgenome.org/locus/'
+                    + encodeURIComponent(sgdId)
+                );
+                window.open(sgdUrl, '_blank', 'noopener,noreferrer');
             }} else {{
                 alert('No valid SGD ID was found.');
             }}
@@ -2808,20 +2922,27 @@ class PathwayReportGenerator:
             // 埋め込みデータから実際のパスウェイSVGデータを取得
             setTimeout(() => {{
                 try {{
-                    const dataElement = document.getElementById('pathway-data');
-                    const data = JSON.parse(dataElement.textContent);
+                    const data = getPathwayReportData();
                     const pathwaySvgData = data.pathway_svgs[pathwayId];
                     
                     if (!pathwaySvgData) {{
                         // SVGデータが見つからない場合のエラー表示
-                        document.getElementById('pathway-diagram-loading').innerHTML = 
-                            `<div style="color: red;">The diagram data for this pathway (${{pathwayId}}) could not be found.<br>` +
-                            `The GPML file may not exist, or the parsing may have failed.</div>`;
+                        const loading = document.getElementById(
+                            'pathway-diagram-loading'
+                        );
+                        loading.style.color = 'red';
+                        loading.textContent = (
+                            `The diagram data for this pathway (${{pathwayId}}) `
+                            + 'could not be found. The GPML file may not exist, '
+                            + 'or the parsing may have failed.'
+                        );
                         return;
                     }}
                     
                     // 実際のSVGデータを表示
-                    document.getElementById('pathway-diagram-content').innerHTML = pathwaySvgData.svg_content;
+                    document.getElementById('pathway-diagram-content').innerHTML = (
+                        validatedSVGMarkup(pathwaySvgData.svg_content)
+                    );
                     document.getElementById('pathway-diagram-loading').style.display = 'none';
                     document.getElementById('pathway-diagram-container').style.display = 'block';
                     
@@ -2837,17 +2958,17 @@ class PathwayReportGenerator:
                         ? ((genesWithGuides / totalGenes) * 100).toFixed(1)
                         : '0.0';
                     
-                    document.getElementById('pathway-diagram-info').innerHTML = `
-                        <strong>Pathway:</strong> ${{pathwaySvgData.pathway_name}} | 
-                        <strong>Total GPML gene nodes:</strong> ${{totalGeneNodes}} | 
-                        <strong>Evaluable nodes:</strong> ${{evaluableGeneNodes}} | 
-                        <strong>Unique Database::ID xrefs:</strong> ${{uniqueXrefCount}} | 
-                        <strong>Unique PW-KFI genes:</strong> ${{totalGenes}} | 
-                        <strong>PW-KFI genes with guides:</strong> ${{genesWithGuides}} | 
-                        <strong>PW-KFI genes without guides:</strong> ${{genesWithoutGuides}} | 
-                        <strong>Colored GPML nodes:</strong> ${{geneNodesWithGuides}} | 
-                        <strong>PW-KFI gene coverage:</strong> ${{coverage}}%
-                    `;
+                    document.getElementById('pathway-diagram-info').textContent = (
+                        `Pathway: ${{pathwaySvgData.pathway_name}} | `
+                        + `Total GPML gene nodes: ${{totalGeneNodes}} | `
+                        + `Evaluable nodes: ${{evaluableGeneNodes}} | `
+                        + `Unique Database::ID xrefs: ${{uniqueXrefCount}} | `
+                        + `Unique PW-KFI genes: ${{totalGenes}} | `
+                        + `PW-KFI genes with guides: ${{genesWithGuides}} | `
+                        + `PW-KFI genes without guides: ${{genesWithoutGuides}} | `
+                        + `Colored GPML nodes: ${{geneNodesWithGuides}} | `
+                        + `PW-KFI gene coverage: ${{coverage}}%`
+                    );
                     
                     // SVG要素にクリックイベントを追加
                     addGeneClickEvents();
@@ -2858,69 +2979,16 @@ class PathwayReportGenerator:
                     
                 }} catch (error) {{
                     console.error('パスウェイ図表示エラー:', error);
-                    document.getElementById('pathway-diagram-loading').innerHTML = 
-                        '<div style="color: red;">Failed to display the pathway diagram.: ' + error.message + '</div>';
+                    const loading = document.getElementById(
+                        'pathway-diagram-loading'
+                    );
+                    loading.style.color = 'red';
+                    loading.textContent = (
+                        'Failed to display the pathway diagram.: '
+                        + error.message
+                    );
                 }}
             }}, 500); // 短い遅延で実際のデータを表示
-        }}
-        
-        function generateSampleSVG(pathwayId, genes) {{
-            const width = 600;
-            const height = 500;
-            
-            let svg = `<svg width="${{width}}" height="${{height}}" viewBox="0 0 ${{width}} ${{height}}" xmlns="http://www.w3.org/2000/svg">`;
-            svg += '<defs><style>';
-            svg += '.gene-node {{ stroke-width: 2; cursor: pointer; }}';
-            svg += '.gene-with-guides {{ fill: #28a745; stroke: #1e7e34; }}';
-            svg += '.gene-without-guides {{ fill: #dc3545; stroke: #bd2130; }}';
-            svg += '.gene-unknown {{ fill: #6c757d; stroke: #545b62; }}';
-            svg += '.metabolite-node {{ fill: #17a2b8; stroke: #117a8b; stroke-width: 2; }}';
-            svg += '.interaction-line {{ stroke: #333; stroke-width: 1.5; fill: none; }}';
-            svg += '.node-label {{ font-family: Arial, sans-serif; font-size: 12px; text-anchor: middle; pointer-events: none; }}';
-            svg += '</style></defs>';
-            
-            // 代謝物ノード（四角形）をいくつか追加
-            const metabolites = [
-                {{ name: 'PRPP', x: 100, y: 100 }},
-                {{ name: 'ATP', x: 150, y: 120 }},
-                {{ name: 'Histidine', x: 500, y: 450 }}
-            ];
-            
-            metabolites.forEach(met => {{
-                svg += `<rect x="${{met.x - 25}}" y="${{met.y - 10}}" width="50" height="20" class="metabolite-node" title="${{met.name}}" />`;
-                svg += `<text x="${{met.x}}" y="${{met.y + 3}}" class="node-label" fill="#000">${{met.name}}</text>`;
-            }});
-            
-            // 相互作用線をいくつか追加
-            for (let i = 0; i < genes.length - 1; i++) {{
-                svg += `<line x1="${{genes[i].x}}" y1="${{genes[i].y}}" x2="${{genes[i+1].x}}" y2="${{genes[i+1].y}}" class="interaction-line" />`;
-            }}
-            
-            // 遺伝子ノード（楕円形）を追加
-            genes.forEach(gene => {{
-                const nodeClass = gene.hasGuides ? 'gene-with-guides' : 'gene-without-guides';
-                svg += `<ellipse cx="${{gene.x}}" cy="${{gene.y}}" rx="30" ry="15" class="gene-node ${{nodeClass}}" `;
-                svg += `data-gene-database="SGD" data-gene-id="${{gene.sgd_id}}" `;
-                svg += `data-gene-key="SGD::${{gene.sgd_id}}" data-sgd-id="${{gene.sgd_id}}" `;
-                svg += `data-gene-name="${{gene.name}}" title="${{gene.name}} (SGD:${{gene.sgd_id}})" />`;
-                svg += `<text x="${{gene.x}}" y="${{gene.y + 3}}" class="node-label" fill="#000">${{gene.name}}</text>`;
-            }});
-            
-            // 凡例を追加
-            const legendY = height - 80;
-            svg += '<g id="legend">';
-            svg += `<rect x="10" y="${{legendY}}" width="200" height="70" fill="white" stroke="#ccc" stroke-width="1" opacity="0.9" />`;
-            svg += `<text x="20" y="${{legendY + 15}}" class="node-label" font-weight="bold">Legend</text>`;
-            svg += `<ellipse cx="30" cy="${{legendY + 30}}" rx="8" ry="6" class="gene-node gene-with-guides" />`;
-            svg += `<text x="45" y="${{legendY + 33}}" class="node-label" font-size="9px">With Guides</text>`;
-            svg += `<ellipse cx="30" cy="${{legendY + 45}}" rx="8" ry="6" class="gene-node gene-without-guides" />`;
-            svg += `<text x="45" y="${{legendY + 48}}" class="node-label" font-size="9px">Without Guides</text>`;
-            svg += `<rect x="120" y="${{legendY + 39}}" width="16" height="12" class="metabolite-node" />`;
-            svg += `<text x="140" y="${{legendY + 48}}" class="node-label" font-size="9px">Metabolite</text>`;
-            svg += '</g>';
-            
-            svg += '</svg>';
-            return svg;
         }}
         
         function addGeneClickEvents() {{
@@ -2943,8 +3011,7 @@ class PathwayReportGenerator:
         function showGeneDetails(geneName, geneDatabase, geneId, geneKey, sgdId, hasGuides) {{
             try {{
                 // 埋め込みデータからパスウェイガイドデータを取得
-                const dataElement = document.getElementById('pathway-data');
-                const data = JSON.parse(dataElement.textContent);
+                const data = getPathwayReportData();
                 
                 // 現在表示中のパスウェイのガイドデータを取得
                 const pathwayGuideData = data.pathway_guide_data[currentPathwayId];
@@ -2958,40 +3025,57 @@ class PathwayReportGenerator:
                 
                 // 遺伝子基本情報を表示
                 const basicInfoDiv = document.getElementById('gene-basic-info');
-                basicInfoDiv.innerHTML = `
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
-                        <div>
-                            <strong>Gene Name:</strong> ${{geneName || 'N/A'}}
-                        </div>
-                        <div>
-                            <strong>Pathway Xref Database:</strong> ${{geneDatabase || 'Unavailable'}}
-                        </div>
-                        <div>
-                            <strong>Pathway Xref ID:</strong> ${{geneId || 'Unavailable'}}
-                        </div>
-                        <div>
-                            <strong>PW-KFI Gene Key:</strong> ${{geneStatus.pw_kfi_gene_key || 'Unavailable'}}
-                        </div>
-                        <div>
-                            <strong>Source Xrefs:</strong> ${{(geneStatus.source_xref_keys || []).join(', ') || 'Unavailable'}}
-                        </div>
-                        <div>
-                            <strong>Resolved SGD annotation ID:</strong> ${{sgdId || 'Unavailable'}}
-                        </div>
-                        <div>
-                            <strong>Match Status:</strong> ${{geneStatus.match_status || 'unavailable'}}
-                        </div>
-                        <div>
-                            <strong>Failure Reason:</strong> ${{geneStatus.failure_reason || '—'}}
-                        </div>
-                        <div>
-                            <strong>Guide Status:</strong> 
-                            <span style="color: ${{hasGuides ? '#28a745' : '#dc3545'}}; font-weight: bold;">
-                                ${{hasGuides ? '✓ Available' : '✗ Not Available'}}
-                            </span>
-                        </div>
-                    </div>
-                `;
+                const infoGrid = document.createElement('div');
+                infoGrid.style.display = 'grid';
+                infoGrid.style.gridTemplateColumns = (
+                    'repeat(auto-fit, minmax(200px, 1fr))'
+                );
+                infoGrid.style.gap = '1rem';
+                const addInfo = (label, value) => {{
+                    const item = document.createElement('div');
+                    const labelElement = document.createElement('strong');
+                    labelElement.textContent = `${{label}}:`;
+                    item.append(
+                        labelElement,
+                        document.createTextNode(` ${{String(value ?? '')}}`)
+                    );
+                    infoGrid.appendChild(item);
+                }};
+                addInfo('Gene Name', geneName || 'N/A');
+                addInfo(
+                    'Pathway Xref Database', geneDatabase || 'Unavailable'
+                );
+                addInfo('Pathway Xref ID', geneId || 'Unavailable');
+                addInfo(
+                    'PW-KFI Gene Key',
+                    geneStatus.pw_kfi_gene_key || 'Unavailable'
+                );
+                addInfo(
+                    'Source Xrefs',
+                    (geneStatus.source_xref_keys || []).join(', ')
+                    || 'Unavailable'
+                );
+                addInfo(
+                    'Resolved SGD annotation ID', sgdId || 'Unavailable'
+                );
+                addInfo(
+                    'Match Status', geneStatus.match_status || 'unavailable'
+                );
+                addInfo(
+                    'Failure Reason', geneStatus.failure_reason || '—'
+                );
+                const guideStatusItem = document.createElement('div');
+                const guideStatusLabel = document.createElement('strong');
+                guideStatusLabel.textContent = 'Guide Status:';
+                const guideStatusValue = document.createElement('span');
+                guideStatusValue.style.color = hasGuides
+                    ? '#28a745' : '#dc3545';
+                guideStatusValue.style.fontWeight = 'bold';
+                guideStatusValue.textContent = hasGuides
+                    ? ' ✓ Available' : ' ✗ Not Available';
+                guideStatusItem.append(guideStatusLabel, guideStatusValue);
+                infoGrid.appendChild(guideStatusItem);
+                basicInfoDiv.replaceChildren(infoGrid);
                 
                 // ガイドRNA詳細テーブルを構築
                 const tbody = document.getElementById('gene-guides-table-body');
@@ -3021,29 +3105,47 @@ class PathwayReportGenerator:
                     
                     geneGuides.forEach(guide => {{
                         const row = tbody.insertRow();
-                        row.innerHTML = `
-                            <td style="font-family: monospace; font-size: 0.9em; background: #f8f9fa; padding: 0.3rem; cursor: pointer;"
-                                title="Click to copy: ${{guide.guide_sequence || ''}}"
-                                onclick="copySequenceToClipboard(this, '${{guide.guide_sequence || ''}}')"
-                            >${{guide.guide_sequence || 'N/A'}}</td>
-                            <td>${{guide.start_pos || 'N/A'}}</td>
-                            <td>${{guide.end_pos || 'N/A'}}</td>
-                            <td>${{guide['MM0'] || 'N/A'}}</td>
-                            <td>${{guide['MM1-2'] || 'N/A'}}</td>
-                            <td>${{guide['off_target_match_score'] || 'N/A'}}</td>
-                            <td>${{guide['strand'] || 'N/A'}}</td>
-                        `;
+                        const sequence = guide.guide_sequence || '';
+                        const sequenceCell = appendTextCell(
+                            row, sequence || 'N/A'
+                        );
+                        sequenceCell.style.fontFamily = 'monospace';
+                        sequenceCell.style.fontSize = '0.9em';
+                        sequenceCell.style.background = '#f8f9fa';
+                        sequenceCell.style.padding = '0.3rem';
+                        sequenceCell.style.cursor = 'pointer';
+                        sequenceCell.title = `Click to copy: ${{sequence}}`;
+                        sequenceCell.addEventListener(
+                            'click', () => copySequenceToClipboard(
+                                sequenceCell, sequence
+                            )
+                        );
+                        appendTextCell(row, guide.start_pos ?? 'N/A');
+                        appendTextCell(row, guide.end_pos ?? 'N/A');
+                        appendTextCell(row, guide['MM0'] ?? 'N/A');
+                        appendTextCell(row, guide['MM1-2'] ?? 'N/A');
+                        appendTextCell(
+                            row, guide['off_target_match_score'] ?? 'N/A'
+                        );
+                        appendTextCell(row, guide['strand'] || 'N/A');
                     }});
                     
                     // 統計情報を追加
                     const statsRow = tbody.insertRow();
                     statsRow.style.backgroundColor = '#e9ecef';
                     statsRow.style.fontWeight = 'bold';
-                    statsRow.innerHTML = `
-                        <td colspan="6" style="text-align: center; padding: 1rem;">
-                            <strong>統計:</strong> ${{geneGuides.length}} Guide RNA design completed
-                        </td>
-                    `;
+                    const statsCell = statsRow.insertCell();
+                    statsCell.colSpan = 7;
+                    statsCell.style.textAlign = 'center';
+                    statsCell.style.padding = '1rem';
+                    const statsLabel = document.createElement('strong');
+                    statsLabel.textContent = '統計:';
+                    statsCell.append(
+                        statsLabel,
+                        document.createTextNode(
+                            ` ${{geneGuides.length}} Guide RNA design completed`
+                        )
+                    );
                 }}
                 
                 // モーダルを表示
@@ -3165,8 +3267,7 @@ class PathwayReportGenerator:
         function downloadPathwayGuides(pathwayId) {{
             try {{
                 // 埋め込みデータからパスウェイガイドデータを取得
-                const dataElement = document.getElementById('pathway-data');
-                const data = JSON.parse(dataElement.textContent);
+                const data = getPathwayReportData();
                 const pathwayGuideData = data.pathway_guide_data[pathwayId];
                 
                 if (!pathwayGuideData || !pathwayGuideData.guides || pathwayGuideData.guides.length === 0) {{
@@ -3431,7 +3532,7 @@ class PathwayReportGenerator:
                                 </thead>
                                 <tbody>
                                     <tr>
-                                        <td>Contigs</td>
+                                        <td>Counts</td>
                                         <td>{integer('gene_prediction', 'transcript_count'):,}</td>
                                         <td>{integer('gene_prediction', 'protein_count'):,}</td>
                                         <td>{integer('annotation', 'total_genes'):,}</td>
