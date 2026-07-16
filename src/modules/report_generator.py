@@ -10,13 +10,17 @@ import hashlib
 import logging
 import sqlite3
 import csv
-import requests
 import time
 import itertools
 import tempfile
 from datetime import datetime
 from pathlib import Path
 import shutil
+
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
 
 from .report_source_store import ReportSourceStore
 
@@ -1058,6 +1062,10 @@ class ReportGenerator:
                 yield batch
         
         def fetch(ids, tries=3, timeout=30):
+            if requests is None:
+                raise RuntimeError(
+                    'The requests package is required to query QuickGO'
+                )
             url_template = ("https://www.ebi.ac.uk/QuickGO/services/"
                            "ontology/go/terms/{ids}?fields=id,name,definition")
             url = url_template.format(ids=",".join(ids))

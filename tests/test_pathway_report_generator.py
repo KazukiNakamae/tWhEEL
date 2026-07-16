@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +18,24 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         self.output_dir = self.temp_dir / 'output'
         self.intermediate_dir.mkdir()
         self.generator = PathwayReportGenerator({
+            'input': {
+                'genome_assembly': 'fixture_genome.fa',
+                'transcriptome': str(
+                    self.intermediate_dir / 'transcriptome.fa'
+                ),
+                'protein_db_for_goanalysis': 'fixture_protein_db.fa',
+            },
+            'crispr': {
+                'pam_pattern': 'NAG',
+                'max_mismatch': 3,
+                'threads': 7,
+            },
+            'busco': {'lineage': 'fixture_lineage'},
+            'database': {'force_rebuild': False},
+            'report': {
+                'generate_summary': False,
+                'generate_html': True,
+            },
             'output': {
                 'intermediate': str(self.intermediate_dir),
                 'base_dir': str(self.output_dir),
@@ -184,6 +203,52 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         marker = '<script type="application/json" id="pathway-data">'
         payload = content.split(marker, 1)[1].split('</script>', 1)[0]
         return json.loads(payload)
+
+    @staticmethod
+    def embedded_report_data(report_path):
+        content = Path(report_path).read_text(encoding='utf-8')
+        marker = '<script type="application/json" id="twheel-data">'
+        payload = content.split(marker, 1)[1].split('</script>', 1)[0]
+        return json.loads(payload)
+
+    def write_common_report_artifacts(self):
+        (self.intermediate_dir / 'transcriptome.fa').write_text(
+            '>fixture_transcript\nACGTACGT\n', encoding='utf-8'
+        )
+        (self.intermediate_dir / 'query.pep').write_text(
+            '>fixture_protein\nMPEPTIDE\n', encoding='utf-8'
+        )
+
+        annotation_header = '\t'.join([
+            'query_id', 'subject_id', 'identity', 'alignment_length',
+            'evalue', 'bit_score', 'description', 'gene_name',
+            'classification', 'unique_id',
+        ])
+        annotation_row = '\t'.join([
+            'fixture_query', 'fixture_subject', '99.0', '100', '1e-20',
+            '200', 'Fixture annotation description', 'FIXTURE_GENE',
+            'Single', 'Single_fixture',
+        ])
+        (self.intermediate_dir / 'annotation_classified.txt').write_text(
+            annotation_header + '\n' + annotation_row + '\n',
+            encoding='utf-8',
+        )
+        (
+            self.intermediate_dir / 'single_genes_targets_specific_clean.bed'
+        ).write_text(
+            'Single_fixture\t10\t33\n', encoding='utf-8'
+        )
+        (
+            self.intermediate_dir / 'multi_genes_targets_specific_clean.bed'
+        ).write_text('', encoding='utf-8')
+
+        final_header = annotation_header + '\tguide_targets'
+        final_row = annotation_row + (
+            '\tSingle_fixture/10/33/FIXTURE_GUIDE_NAG/1/0/0.987/+'
+        )
+        (self.intermediate_dir / 'annotation_with_guides_final.tsv').write_text(
+            final_header + '\n' + final_row + '\n', encoding='utf-8'
+        )
 
     def test_svg_uses_exact_database_and_identifier_composite_key(self):
         pathway_data = {
@@ -707,6 +772,147 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             ValueError, 'Invalid matched_gene_count for WP9999'
         ):
             self.generator.load_pathway_analysis_results()
+
+    def test_html_sidebar_and_sections_follow_the_go_report_contract(self):
+        html_content = self.generator.create_pathway_html_template(
+            [],
+            {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
+            {},
+        )
+
+        nav_items = re.findall(
+            r'<li>\s*<a href="#([^"]+)" '
+            r'class="nav-link(?: active)?">([^<]+)</a>\s*</li>',
+            html_content,
+        )
+        expected_items = [
+            ('general-stats', 'General Statistics'),
+            ('gene-prediction', 'Gene Prediction'),
+            ('gene-annotation', 'Gene Annotation'),
+            ('guide-rna', 'Guide RNA Design'),
+            ('pw-kfi-assessment', 'PW-KFI Assessment'),
+            ('configuration', 'Analysis Configuration'),
+        ]
+        self.assertEqual(nav_items, expected_items)
+        self.assertEqual(
+            re.findall(
+                r'<section id="([^"]+)" '
+                r'class="content-section(?: [^"]*)?">',
+                html_content,
+            ),
+            [section_id for section_id, _ in expected_items],
+        )
+        self.assertIn(
+            '<a href="#general-stats" class="nav-link active">',
+            html_content,
+        )
+        for _, label in expected_items:
+            with self.subTest(section_heading=label):
+                self.assertEqual(
+                    html_content.count(f'<h2>{label}</h2>'), 1
+                )
+
+    def test_pw_kfi_content_is_grouped_in_one_assessment_section(self):
+        html_content = self.generator.create_pathway_html_template(
+            [],
+            {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
+            {},
+        )
+
+        assessment_start = html_content.index(
+            '<section id="pw-kfi-assessment"'
+        )
+        assessment_end = html_content.index(
+            '<section id="configuration" class="content-section">',
+            assessment_start,
+        )
+        assessment_html = html_content[assessment_start:assessment_end]
+        outside_assessment = (
+            html_content[:assessment_start] + html_content[assessment_end:]
+        )
+
+        self.assertEqual(
+            assessment_html.count(
+                '<h3>Pathway Targetability Distribution</h3>'
+            ),
+            1,
+        )
+        self.assertEqual(
+            assessment_html.count('<h3>Pathway Analysis Results</h3>'),
+            1,
+        )
+        self.assertNotIn(
+            '<h3>Pathway Targetability Distribution</h3>', outside_assessment
+        )
+        self.assertNotIn(
+            '<h3>Pathway Analysis Results</h3>', outside_assessment
+        )
+        self.assertEqual(
+            html_content.count('<h2>PW-KFI Assessment</h2>'), 1
+        )
+        self.assertNotIn('<section id="summary-stats"', html_content)
+        self.assertNotIn('<section id="pathway-analysis"', html_content)
+        self.assertNotIn('<h2>Summary Statistics</h2>', html_content)
+        self.assertNotIn('<h2>Pathway Analysis</h2>', html_content)
+
+    def test_common_sections_embed_run_data_and_analysis_configuration(self):
+        self.write_canonical_artifacts()
+        self.write_common_report_artifacts()
+
+        results = self.generator.run()
+        html_content = Path(results['html_report_path']).read_text(
+            encoding='utf-8'
+        )
+        embedded_data = self.embedded_report_data(
+            results['html_report_path']
+        )
+
+        stats = embedded_data['statistics']
+        self.assertEqual(stats['gene_prediction']['transcript_count'], 1)
+        self.assertEqual(stats['gene_prediction']['protein_count'], 1)
+        self.assertEqual(
+            stats['gene_prediction']['proteins'][0]['id'],
+            'fixture_protein',
+        )
+        self.assertEqual(stats['annotation']['total_genes'], 1)
+        self.assertEqual(stats['annotation']['single_genes'], 1)
+        self.assertEqual(stats['guide_design']['total_guides'], 1)
+
+        self.assertEqual(len(embedded_data['gene_annotation']), 1)
+        self.assertEqual(
+            embedded_data['gene_annotation'][0]['gene_name'],
+            'FIXTURE_GENE',
+        )
+        self.assertEqual(
+            embedded_data['gene_annotation'][0]['description'],
+            'Fixture annotation description',
+        )
+        self.assertEqual(len(embedded_data['guide_rna']), 1)
+        self.assertEqual(
+            embedded_data['guide_rna'][0]['target_sequence'],
+            'FIXTURE_GUIDE_NAG',
+        )
+        self.assertEqual(embedded_data['guide_rna'][0]['mm0'], 1)
+        self.assertEqual(embedded_data['guide_rna'][0]['mm1_2'], 0)
+
+        self.assertEqual(
+            embedded_data['config']['input']['genome_assembly'],
+            'fixture_genome.fa',
+        )
+        self.assertEqual(
+            embedded_data['config']['crispr'],
+            {'pam_pattern': 'NAG', 'max_mismatch': 3, 'threads': 7},
+        )
+        self.assertEqual(
+            embedded_data['config']['busco'],
+            {'lineage': 'fixture_lineage'},
+        )
+        self.assertIn('FIXTURE_GENE', html_content)
+        self.assertIn('FIXTURE_GUIDE_NAG', html_content)
+        self.assertIn('fixture_genome.fa', html_content)
+        self.assertIn('<strong>PAM Pattern:</strong> NAG', html_content)
+        self.assertIn('<strong>Max Mismatch:</strong> 3', html_content)
+        self.assertIn('<strong>Threads:</strong> 7', html_content)
 
     def test_html_guide_lookup_has_no_gene_name_fallback(self):
         html_content = self.generator.create_pathway_html_template(

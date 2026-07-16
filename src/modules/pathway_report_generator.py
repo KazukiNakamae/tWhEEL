@@ -9,6 +9,7 @@ import json
 import logging
 import csv
 import ast
+import copy
 import hashlib
 import shutil
 import html
@@ -1529,8 +1530,10 @@ class PathwayReportGenerator:
         self.logger.info(f"Pathway summary JSON generation: {json_path}")
         return summary_data
     
-    def create_pathway_html_template(self, pathways, summary_data, pathway_genes=None):
-        """Generate a dedicated HTML template for the pathway."""
+    def _create_legacy_pathway_html_template(
+        self, pathways, summary_data, pathway_genes=None
+    ):
+        """Build the pathway-only markup used by the unified report composer."""
         # パスウェイデータを準備
         pathway_table_data = []
         for pathway in pathways:
@@ -3267,24 +3270,401 @@ class PathwayReportGenerator:
 </html>'''
         
         return html_template
+
+    def _normalized_shared_report_config(self):
+        """Return a report-safe config without mutating the pipeline config."""
+        config = copy.deepcopy(self.config)
+        config.setdefault('input', {})
+        config.setdefault('crispr', {})
+        config.setdefault('busco', {})
+        config.setdefault('pathway_analysis', {})
+        return config
+
+    def _collect_shared_report_context(self):
+        """Collect the data used by the common GO/PW report sections."""
+        from .report_generator import ReportGenerator
+
+        generator = ReportGenerator(self._normalized_shared_report_config())
+        return generator, generator.collect_all_results()
+
+    @staticmethod
+    def _replace_report_block(content, start_marker, end_marker, replacement):
+        """Replace one marker-delimited report block and fail on drift."""
+        start = content.find(start_marker)
+        if start < 0:
+            raise ValueError(f'Report start marker not found: {start_marker}')
+        end = content.find(end_marker, start)
+        if end < 0:
+            raise ValueError(f'Report end marker not found: {end_marker}')
+        return content[:start] + replacement + content[end:]
+
+    @staticmethod
+    def _pathway_assessment_html(summary_data):
+        """Return the PW-KFI assessment section in the shared report style."""
+        stats = summary_data.get('statistics', {}).get(
+            'pathway_analysis', {}
+        )
+
+        def integer(key):
+            try:
+                return int(stats.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        return f'''                <!-- PW-KFI Assessment Section -->
+                <section id="pw-kfi-assessment" class="content-section">
+                    <div class="section-header">
+                        <h2>PW-KFI Assessment</h2>
+                    </div>
+                    <div class="section-body">
+                        <p>Pathway-based knock-out feasibility assessment (PW-KFI assessment).</p>
+
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <div class="stat-value stat-value-total-go" id="total-pathways">{integer('total_pathways'):,}</div>
+                                <div class="stat-label">Total Pathways</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value stat-value-fully-targetable" id="fully-targetable">{integer('fully_targetable_pathways'):,}</div>
+                                <div class="stat-label">Fully Targetable Pathways</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value stat-value-partially-targetable" id="partially-targetable">{integer('partially_targetable_pathways'):,}</div>
+                                <div class="stat-label">Partially Targetable Pathways</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value stat-value-not-targetable" id="not-targetable">{integer('not_targetable_pathways'):,}</div>
+                                <div class="stat-label">Not Targetable Pathways</div>
+                            </div>
+                        </div>
+
+                        <div class="pw-chart-block">
+                            <h3>Pathway Targetability Distribution</h3>
+                            <div class="chart-container" id="targetabilityChart"></div>
+                        </div>
+
+                        <div class="pw-results-block">
+                            <div class="pw-results-header">
+                                <h3>Pathway Analysis Results</h3>
+                                <div class="filter-group">
+                                    <input type="text" class="search-box" id="search-input" placeholder="Search pathways...">
+                                    <select class="filter-select" id="targetable-filter">
+                                        <option value="">All PW-KFI Classes</option>
+                                        <option value="Fully targetable">Fully Targetable</option>
+                                        <option value="Partially targetable">Partially Targetable</option>
+                                        <option value="Not targetable">Not Targetable</option>
+                                    </select>
+                                    <button class="btn btn-primary" onclick="downloadPathwayCSV()" title="Download Pathway Analysis CSV">
+                                        📥 Download CSV
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div id="table-loading" class="loading">Loading pathway data...</div>
+                            <div class="table-responsive">
+                                <table class="data-table" id="pathway-table" style="display: none;">
+                                    <thead>
+                                        <tr>
+                                            <th onclick="sortTable(0)">Pathway ID</th>
+                                            <th onclick="sortTable(1)">Pathway Name</th>
+                                            <th onclick="sortTable(2)">Raw GPML Nodes</th>
+                                            <th onclick="sortTable(3)">Evaluable Nodes</th>
+                                            <th onclick="sortTable(4)">Unique Xrefs</th>
+                                            <th onclick="sortTable(5)">Unique PW-KFI Genes</th>
+                                            <th onclick="sortTable(6)">PW-KFI Genes with Guides</th>
+                                            <th onclick="sortTable(7)">PW-KFI Score</th>
+                                            <th onclick="sortTable(8)">Targetability</th>
+                                            <th onclick="sortTable(9)">Annotation Match Coverage</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pathway-table-body"></tbody>
+                                </table>
+                            </div>
+                            <div class="pagination-controls" id="pagination" style="display: none;"></div>
+                        </div>
+                    </div>
+                </section>
+
+'''
+
+    def _general_statistics_html(self, common_results, summary_data):
+        """Return pathway-aware general statistics in the shared layout."""
+        stats = common_results.get('statistics', {})
+        pathway_stats = (
+            summary_data.get('statistics', {}).get('pathway_analysis', {})
+        )
+
+        def integer(group, key):
+            try:
+                return int(stats.get(group, {}).get(key, 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        total_pathways = int(pathway_stats.get('total_pathways', 0) or 0)
+        fully_percent = float(
+            pathway_stats.get('fully_targetable_percent', 0) or 0
+        )
+        return f'''                <!-- General Statistics Section -->
+                <section id="general-stats" class="content-section">
+                    <div class="section-header">
+                        <h2>General Statistics</h2>
+                    </div>
+                    <div class="section-body">
+                        <div class="alert alert-info">
+                            <strong>Welcome!</strong> Not sure where to start?
+                            <a href="#pw-kfi-assessment">Jump to PW-KFI Assessment</a> section to see detailed results.
+                        </div>
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th></th>
+                                        <th>Total transcripts</th>
+                                        <th>Protein Annotated</th>
+                                        <th>Total Annotated Genes</th>
+                                        <th>Multi (Redundant)</th>
+                                        <th>Single (Non-Redundant)</th>
+                                        <th>Pathways</th>
+                                        <th>Fully Targetable Pathways [%]</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Contigs</td>
+                                        <td>{integer('gene_prediction', 'transcript_count'):,}</td>
+                                        <td>{integer('gene_prediction', 'protein_count'):,}</td>
+                                        <td>{integer('annotation', 'total_genes'):,}</td>
+                                        <td>{integer('annotation', 'multi_genes'):,}</td>
+                                        <td>{integer('annotation', 'single_genes'):,}</td>
+                                        <td>{total_pathways:,}</td>
+                                        <td>{fully_percent:.1f}%</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+'''
+
+    def _analysis_configuration_html(self, common_results):
+        """Return PW-specific configuration cards in the shared layout."""
+        config = common_results.get('config', {})
+        inputs = config.get('input', {})
+        crispr = config.get('crispr', {})
+        pathway = config.get('pathway_analysis', {})
+
+        def escaped(mapping, key, default='N/A'):
+            value = mapping.get(key, default)
+            if value in (None, ''):
+                value = default
+            return html.escape(str(value))
+
+        return f'''                <!-- Configuration Section -->
+                <section id="configuration" class="content-section">
+                    <div class="section-header">
+                        <h2>Analysis Configuration</h2>
+                    </div>
+                    <div class="section-body">
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <h3>Input Files</h3>
+                                <ul class="configuration-list">
+                                    <li><strong>Genome Assembly:</strong><br>{escaped(inputs, 'genome_assembly')}</li>
+                                    <li><strong>Transcriptome:</strong><br>{escaped(inputs, 'transcriptome')}</li>
+                                    <li><strong>Protein Sequences:</strong><br>{escaped(inputs, 'protein_sequences')}</li>
+                                    <li><strong>Annotation Database:</strong><br>{escaped(inputs, 'sgd_db')}</li>
+                                </ul>
+                            </div>
+                            <div class="stat-card">
+                                <h3>CRISPR Settings</h3>
+                                <ul class="configuration-list">
+                                    <li><strong>PAM Pattern:</strong> {escaped(crispr, 'pam_pattern')}</li>
+                                    <li><strong>Max Mismatch:</strong> {escaped(crispr, 'max_mismatch')}</li>
+                                    <li><strong>Threads:</strong> {escaped(crispr, 'threads')}</li>
+                                </ul>
+                            </div>
+                            <div class="stat-card">
+                                <h3>Pathway Analysis Settings</h3>
+                                <ul class="configuration-list">
+                                    <li><strong>WikiPathways GPML Directory:</strong><br>{escaped(pathway, 'wikipathways_gpml_dir')}</li>
+                                    <li><strong>Minimum Pathway Coverage:</strong> {escaped(pathway, 'minimum_pathway_coverage')}</li>
+                                    <li><strong>Skip Low-Coverage Pathways:</strong> {escaped(pathway, 'skip_low_coverage_pathways')}</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+'''
+
+    @staticmethod
+    def _pathway_report_css():
+        """Return styles limited to PW-only tables, charts, and modals."""
+        return '''
+        .main-content { min-width: 0; }
+        .content-section, .table-responsive { max-width: 100%; }
+        #pw-kfi-assessment h3 { margin: 0 0 1rem; color: #333; }
+        .pw-chart-block { margin-bottom: 2rem; }
+        .pw-chart-block .chart-container { height: 350px; overflow-x: auto; }
+        .pw-chart-block svg { max-width: 100%; height: auto; }
+        .pw-results-block { border-top: 1px solid #dee2e6; padding-top: 1.5rem; }
+        .pw-results-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+        .pw-results-header .filter-group { flex: 1; justify-content: flex-end; }
+        #pathway-table th { cursor: pointer; white-space: nowrap; }
+        #pathway-table th:last-child { cursor: default; }
+        #pagination .page-btn { padding: 0.375rem 0.75rem; border: 1px solid #ced4da; border-radius: 0.375rem; background: #fff; color: #495057; cursor: pointer; }
+        #pagination .page-btn:hover, #pagination .page-btn.active { background: #007bff; border-color: #007bff; color: #fff; }
+        .modal { display: none; position: fixed; z-index: 2000; inset: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0, 0, 0, 0.5); }
+        .modal-content { position: relative; background-color: #fff; margin: 5vh auto; padding: 2rem; border: 1px solid #dee2e6; border-radius: 0.375rem; max-height: 90vh; overflow: auto; }
+        .modal-content .close { position: absolute; top: 0.75rem; right: 1rem; color: #6c757d; font-size: 1.75rem; font-weight: 700; cursor: pointer; }
+        .modal-content .close:hover { color: #212529; }
+        .modal-content table { width: 100%; border-collapse: collapse; }
+        .modal-content th, .modal-content td { padding: 0.75rem; border-bottom: 1px solid #dee2e6; text-align: left; }
+        .modal-content th { background-color: #f8f9fa; position: sticky; top: 0; }
+        .btn.secondary { background-color: #6c757d; border-color: #6c757d; color: #fff; }
+        .configuration-list { text-align: left; font-size: 0.85rem; overflow-wrap: anywhere; }
+        .configuration-list li { margin-bottom: 0.75rem; }
+        @media (max-width: 768px) {
+            .pw-results-header { display: block; }
+            .pw-results-header .filter-group { justify-content: stretch; }
+            .modal-content { width: calc(100% - 2rem) !important; margin: 1rem auto; padding: 1.25rem; }
+        }
+'''
+
+    def create_pathway_html_template(
+        self, pathways, summary_data, pathway_genes=None,
+        common_results=None, common_report_generator=None,
+    ):
+        """Compose PW-KFI content into the standard GO-KFI report shell."""
+        legacy_html = self._create_legacy_pathway_html_template(
+            pathways, summary_data, pathway_genes
+        )
+
+        if common_results is None or common_report_generator is None:
+            common_report_generator, common_results = (
+                self._collect_shared_report_context()
+            )
+
+        # The shared shell needs common pipeline data, but not GO-only data.
+        base_results = dict(common_results)
+        base_results['data'] = dict(common_results.get('data', {}))
+        base_results['report_data'] = dict(
+            common_results.get('report_data', {})
+        )
+        base_results['statistics'] = dict(
+            common_results.get('statistics', {})
+        )
+        for key in (
+            'go_kfi_stat', 'go_kfi_table', 'go_reverse_lookup',
+            'go_parent_counts', 'go_parent_counts_image',
+            'go_parent_counts_treemap_image',
+        ):
+            base_results['data'].pop(key, None)
+            base_results['report_data'].pop(key, None)
+        base_results['statistics'].pop('go_analysis', None)
+
+        report_html = common_report_generator._generate_html_content(
+            base_results
+        )
+
+        data_start = legacy_html.index(
+            '<script type="application/json" id="pathway-data">'
+        )
+        data_end = legacy_html.index('</script>', data_start) + len('</script>')
+        pathway_data_script = legacy_html[data_start:data_end]
+
+        modal_start = legacy_html.index('<div id="pathway-genes-modal"')
+        script_start = legacy_html.index('<script>', modal_start)
+        script_end = legacy_html.index('</script>', script_start) + len('</script>')
+        pathway_modals = legacy_html[modal_start:script_start]
+        pathway_script = legacy_html[script_start:script_end]
+
+        report_html = self._replace_report_block(
+            report_html,
+            '                <!-- General Statistics Section -->',
+            '                <!-- Gene Prediction Section -->',
+            self._general_statistics_html(common_results, summary_data),
+        )
+        report_html = self._replace_report_block(
+            report_html,
+            '                <!-- GO-KFI Assessment Section -->',
+            '                <!-- Configuration Section -->',
+            self._pathway_assessment_html(summary_data),
+        )
+        configuration_end = '            </div>\n        </main>'
+        report_html = self._replace_report_block(
+            report_html,
+            '                <!-- Configuration Section -->',
+            configuration_end,
+            self._analysis_configuration_html(common_results),
+        )
+
+        replacements = {
+            '<title>tWhEEL - Transcriptome Functional Analysis Report</title>':
+                '<title>tWhEEL - Pathway Analysis Report</title>',
+            'gene ontology (GO)-based knock-out feasibility assessment':
+                'pathway-based knock-out feasibility assessment',
+            '<li><a href="#go-analysis" class="nav-link">GO-KFI Assessment</a></li>':
+                '<li><a href="#pw-kfi-assessment" class="nav-link">PW-KFI Assessment</a></li>',
+            '<li><a href="#configuration" class="nav-link">Configuration</a></li>':
+                '<li><a href="#configuration" class="nav-link">Analysis Configuration</a></li>',
+            'TransDecoder was used to predict protein-coding genes from the transcriptome assembly.':
+                'Protein-coding sequences used in this analysis are summarized below.',
+            'Protein sequences were searched against UniProt Knowledgebase (UniProtKB) database using FASTA for functional annotation.':
+                'Functional annotations used for PW-KFI and guide RNA analysis are summarized below.',
+            '<th>UniProt Name</th>': '<th>Annotation ID</th>',
+        }
+        for old, new in replacements.items():
+            if report_html.count(old) != 1:
+                raise ValueError(f'Unexpected shared report marker count: {old}')
+            report_html = report_html.replace(old, new, 1)
+
+        report_html = report_html.replace(
+            '</head>',
+            f'<style id="pw-kfi-styles">{self._pathway_report_css()}</style>\n</head>',
+            1,
+        )
+        twheel_data_start = report_html.index(
+            '<script type="application/json" id="twheel-data">'
+        )
+        twheel_data_end = (
+            report_html.index('</script>', twheel_data_start)
+            + len('</script>')
+        )
+        report_html = (
+            report_html[:twheel_data_end]
+            + '\n    '
+            + pathway_data_script
+            + report_html[twheel_data_end:]
+        )
+
+        main_script = '    <script src="static/js/main.js"></script>'
+        if report_html.count(main_script) != 1:
+            raise ValueError('Unexpected shared main script marker count')
+        report_html = report_html.replace(
+            main_script,
+            f'    {pathway_modals}\n\n{main_script}\n    {pathway_script}',
+            1,
+        )
+        return report_html
     
     def generate_pathway_html_report(self, pathways, pathway_genes, summary_data):
         """Generate a pathway HTML report"""
-        html_content = self.create_pathway_html_template(pathways, summary_data, pathway_genes)
-        
-        # ロゴファイルのコピー
-        img_dir = os.path.join(self.output_dir, 'static', 'img')
-        Path(img_dir).mkdir(parents=True, exist_ok=True)
-        src_logo = (
-            Path(__file__).resolve().parents[1]
-            / 'web' / 'static' / 'img' / 'logo.png'
+        common_generator, common_results = self._collect_shared_report_context()
+        common_generator._create_css_files()
+        common_generator._create_js_files()
+        common_generator._copy_static_assets(common_results)
+
+        html_content = self.create_pathway_html_template(
+            pathways,
+            summary_data,
+            pathway_genes,
+            common_results=common_results,
+            common_report_generator=common_generator,
         )
-        dst_logo = os.path.join(img_dir, 'logo.png')
-        if src_logo.exists():
-            shutil.copy2(src_logo, dst_logo)
-            self.logger.info(f"Logo copied: {src_logo} -> {dst_logo}")
         
-        # HTMLファイル保存
+        # Write the unified report after all shared assets are ready.
         report_name = self.pathway_report_config.get('output_name', 'pathway_report.html')
         report_path = os.path.join(self.output_dir, report_name)
         
