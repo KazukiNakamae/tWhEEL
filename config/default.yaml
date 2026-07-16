@@ -26,6 +26,11 @@ fasta_search:
   evalue: 0.1
   threads: 8
 
+multi_gene_alignment:
+  workers: 4  # Maximum number of Multi-gene groups aligned concurrently
+  memory: "4g"  # Total memory limit for the alignment container
+  cache_enabled: true  # Reuse validated group-level consensus results
+
 crispr:
   docker_image: "kazukinakamae/crisflash:1.2.0"
   pam_pattern: "NGG"
@@ -34,13 +39,14 @@ crispr:
   memory: "40g"
 
 go_analysis:
-  add_go_image: "kazukinakamae/add-go-columns:v1.1"
-  compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.1"
+  add_go_image: "kazukinakamae/add-go-columns:v1.2"
+  compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.2"
   count_parent_image: "kazukinakamae/count_go_parent_terms:v1.1"
 
 report:
   generate_html: true
   generate_summary: true
+  guide_chunk_rows: 5000  # Browser payload rows per deferred guide script
   web_port: 5000  # Legacy setting; the current pipeline generates static files only
 
 database:

@@ -50,6 +50,54 @@ def _require_valid_unique_ids(df):
         )
 
 
+def _parse_guide_count(value, unique_id):
+    """Return one validated non-negative integer guide count."""
+    if pd.isna(value) or isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"guide_count for {unique_id!r} must be a non-negative integer."
+        )
+
+    if isinstance(value, (int, np.integer)):
+        guide_count = int(value)
+    elif isinstance(value, (float, np.floating)):
+        if not np.isfinite(value) or not float(value).is_integer():
+            raise ValueError(
+                f"guide_count for {unique_id!r} must be a non-negative integer."
+            )
+        guide_count = int(value)
+    else:
+        normalized = str(value).strip()
+        if not normalized.isdigit():
+            raise ValueError(
+                f"guide_count for {unique_id!r} must be a non-negative integer."
+            )
+        guide_count = int(normalized)
+
+    if guide_count < 0:
+        raise ValueError(
+            f"guide_count for {unique_id!r} must be a non-negative integer."
+        )
+    return guide_count
+
+
+def _validated_guide_counts_by_unique_id(df):
+    """Validate canonical guide counts and reject per-gene conflicts."""
+    guide_counts = {}
+    for unique_id_value, guide_count_value in zip(
+        df['unique_id'], df['guide_count']
+    ):
+        unique_id = str(unique_id_value).strip()
+        guide_count = _parse_guide_count(guide_count_value, unique_id)
+        previous_count = guide_counts.get(unique_id)
+        if previous_count is not None and previous_count != guide_count:
+            raise ValueError(
+                f"Conflicting guide_count values for {unique_id!r}: "
+                f"{previous_count} and {guide_count}."
+            )
+        guide_counts[unique_id] = guide_count
+    return guide_counts
+
+
 def _merge_gene_guides(gene_data, guide_targets_str):
     """Merge guide targets while avoiding large sets for identical repeated rows."""
     if pd.isna(guide_targets_str):
@@ -73,6 +121,8 @@ def _merge_gene_guides(gene_data, guide_targets_str):
 
 def _get_gene_guide_count(gene_data):
     """Return a gene's unique guide count after row-level aggregation."""
+    if gene_data['guide_count'] is not None:
+        return gene_data['guide_count']
     if gene_data['guide_set'] is not None:
         return len(gene_data['guide_set'])
     return parse_guide_targets(gene_data['guide_field'])
@@ -81,6 +131,11 @@ def _get_gene_guide_count(gene_data):
 def calculate_go_kfi(df):
     """Calculate GO-KFI using unique_id as the gene-level counting unit."""
     _require_valid_unique_ids(df)
+    canonical_guide_counts = (
+        _validated_guide_counts_by_unique_id(df)
+        if 'guide_count' in df.columns
+        else None
+    )
 
     genes = {}
     go_order = []
@@ -91,11 +146,17 @@ def calculate_go_kfi(df):
         unique_id = str(row['unique_id']).strip()
         gene_data = genes.setdefault(unique_id, {
             'go_terms': set(),
+            'guide_count': (
+                canonical_guide_counts[unique_id]
+                if canonical_guide_counts is not None
+                else None
+            ),
             'guide_field': None,
             'guide_set': None,
         })
 
-        _merge_gene_guides(gene_data, row.get('guide_targets', ''))
+        if canonical_guide_counts is None:
+            _merge_gene_guides(gene_data, row.get('guide_targets', ''))
 
         go_terms_str = row.get('GO_ALL', '')
         if pd.isna(go_terms_str) or not str(go_terms_str).strip():
@@ -250,18 +311,47 @@ def validate_input_data(df):
         print("3. Network connectivity issues", file=sys.stderr)
         return False
     
-    # guide_targets列の確認
-    if 'guide_targets' not in df.columns:
-        print("ERROR: guide_targets column not found!", file=sys.stderr)
-        return False
-    
-    # guide_targets列のデータ確認
-    guide_non_empty = df['guide_targets'].notna() & (df['guide_targets'] != '') & (df['guide_targets'] != 'nan')
-    guide_count = guide_non_empty.sum()
-    print(f"guide_targets: {guide_count} non-empty entries ({guide_count/len(df)*100:.1f}%)")
-    
-    if guide_count == 0:
-        print("WARNING: No guide targets found!", file=sys.stderr)
+    if 'guide_count' in df.columns:
+        try:
+            canonical_guide_counts = _validated_guide_counts_by_unique_id(df)
+        except ValueError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return False
+        genes_with_guides = sum(
+            guide_count > 0 for guide_count in canonical_guide_counts.values()
+        )
+        total_genes = len(canonical_guide_counts)
+        percentage = (
+            genes_with_guides / total_genes * 100 if total_genes else 0.0
+        )
+        print(
+            "guide_count: "
+            f"{genes_with_guides} genes with guides ({percentage:.1f}%)"
+        )
+        if genes_with_guides == 0:
+            print("WARNING: No guide targets found!", file=sys.stderr)
+    else:
+        # Preserve support for contig-level legacy tables.
+        if 'guide_targets' not in df.columns:
+            print(
+                "ERROR: guide_count or guide_targets column not found!",
+                file=sys.stderr,
+            )
+            return False
+
+        guide_non_empty = (
+            df['guide_targets'].notna()
+            & (df['guide_targets'] != '')
+            & (df['guide_targets'] != 'nan')
+        )
+        guide_count = guide_non_empty.sum()
+        print(
+            f"guide_targets: {guide_count} non-empty entries "
+            f"({guide_count/len(df)*100:.1f}%)"
+        )
+
+        if guide_count == 0:
+            print("WARNING: No guide targets found!", file=sys.stderr)
     
     print(f"Data validation completed. Total GO entries: {total_go_entries}")
     return True

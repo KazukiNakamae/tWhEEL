@@ -153,6 +153,7 @@ and identifiers must fully match the configured regular expression. Only
 ### 3.5 Effective and legacy settings
 
 - `report.generate_html` and `report.generate_summary` are effective.
+- `report.guide_chunk_rows` is effective and defaults to `5000`.
 - `pathway_report.output_name` is effective and defaults to
   `pathway_report.html`.
 - `database.force_rebuild` controls rebuilding the minimal GO cache.
@@ -222,9 +223,13 @@ Cache identity includes the query and database real paths, sizes, modification
 times, namespace, and search settings. Results and metadata are published only
 after a successful non-empty search.
 
-Multi-group alignment builds and runs the local Docker image
-`run_alignment_and_mask/v1.0`. Every expected group must produce exactly one
-non-empty consensus FASTA with the expected identifier.
+Multi-group alignment builds or reuses a content-tagged local Docker image,
+then runs a bounded number of single-threaded MAFFT processes. Validated
+consensus results are cached by ordered input content, algorithm schema, and
+immutable image identity. Every expected group must produce exactly one
+non-empty consensus FASTA with the expected identifier. Workspace generation
+locks and staged publication prevent concurrent or failed runs from exposing a
+mixed output generation.
 
 ### 4.3 `GuideDesign`
 
@@ -237,11 +242,24 @@ Responsibilities:
 - prepare Single sequences and validated Multi consensus sequences;
 - run CrisFlash separately for the available Single/Multi groups;
 - retain site-specific targets; and
-- merge guide data into `annotation_with_guides_final.tsv`.
+- publish one normalized gene/guide generation.
 
-The final table retains contig-level annotation rows for provenance. All
-gene-level report statistics and embedded report tables collapse those rows by
-`unique_id`; guide entries are unioned within each group before counting.
+`normalized_genes.tsv` contains exactly one row per `unique_id`, including the
+deterministic representative alignment, all query IDs, annotation row count,
+guide count, and explicit database identifiers. `normalized_guides.tsv`
+contains one row per distinct typed guide tuple. A disk-backed SQLite index
+de-duplicates guides while the generation is built, so peak Python memory does
+not scale with the full guide set.
+
+Each immutable generation also contains a compact, one-row-per-gene
+`annotation_with_guides_final.tsv` for compatibility. Contig-level provenance
+remains in `annotation_classified.txt`; the legacy compatibility table is no
+longer the authoritative downstream representation. SHA-256 metadata covers
+the normalized artifacts, and `normalized_gene_guide_current.json` is replaced
+only after a complete generation has been written. A failed publication leaves
+the previous current generation selected. Source paths, sizes, modification
+times, and SHA-256 hashes bind the generation to its annotation and guide BED
+inputs; stale current data fails closed.
 
 CrisFlash target field four has the form
 `<sequence>/<MM0>/<MM1-2>`. A site-specific target is retained only when
@@ -262,8 +280,14 @@ Responsibilities:
 - create a compact GO-to-gene reverse lookup; and
 - write `go_analysis_results.txt`.
 
-Annotation rows are collapsed by `unique_id`; GO terms and guide entries are
-de-duplicated before counting:
+New runs send `normalized_genes.tsv` directly to GO annotation and use its
+validated non-negative `guide_count`; they do not reparse serialized guide
+payloads. Runs without a normalized current pointer retain the legacy
+contig-table fallback. In either form, each `unique_id` is counted once:
+
+Normalized runs require the GO annotation and GO-KFI helper images to declare
+normalized schema version `1`. Cached helpers without the label are rebuilt
+from the local Docker contexts before execution.
 
 ```text
 GO-KFI = unique genes with retained guides / unique genes in the GO term
@@ -297,6 +321,11 @@ Responsibilities:
 - compute PW-KFI; and
 - write result and audit artifacts.
 
+Pathway analysis prefers the current normalized generation and reconstructs
+raw guide strings only at its compatibility boundary. If no current pointer
+exists it reads the legacy table. A present but invalid pointer fails closed
+instead of silently mixing generations.
+
 Non-evaluable GPML nodes are excluded from the denominator. Exact canonical
 matched and unmatched units are included:
 
@@ -320,13 +349,30 @@ Responsibilities:
 - generate `summary.txt` when enabled;
 - maintain a minimal, integrity-checked SQLite GO metadata cache;
 - generate `web_data/summary.json`;
-- generate static assets; and
-- generate `report.html` when enabled.
+- generate static assets;
+- stream immutable browser payloads under
+  `web_data/report_payloads/<namespace>-<generation>/`; and
+- atomically publish `report.html` when enabled after its payload generation is
+  complete.
 
-All external strings are context-escaped before HTML rendering. JSON embedded
-in HTML script elements escapes HTML raw-text delimiters while remaining valid
-JSON, and dynamic report tables never place unescaped external strings into
-`innerHTML` or inline event-handler source.
+`report.html` is a rendering shell and does not embed the analysis payload.
+Browser data is published as classic `core.js` and `guides/*.js` scripts so the
+report works when opened directly with `file://`, without module loading or
+runtime `fetch`. Core data loads with the shell. Guide chunks load only when the
+Guide section is opened. Python writes guide chunks by streaming source rows,
+publishes the immutable payload generation, and only then atomically replaces
+the HTML shell.
+
+Published payload generations remain immutable and are not automatically
+deleted. This preserves delayed guide-chunk reads in report tabs that were
+opened before a rerun. Unreferenced generations may be removed only when no
+reader still uses them. A generation without a matching marker under
+`report_payloads/.committed/` is an orphan from a failed HTML publication and
+is removed after the next successful commit.
+
+All external strings are context-escaped before HTML rendering. Generated data
+scripts use script-safe serialization, and dynamic report tables never place
+unescaped external strings into `innerHTML` or inline event-handler source.
 
 QuickGO supplies missing GO labels and definitions. Native analysis tables are
 not loaded into SQLite.
@@ -344,21 +390,25 @@ Responsibilities:
 - publish those files and referenced GPML files in the pathway snapshot;
 - reuse the standard report shell and assets;
 - render pathway SVG content from GPML graphics/interactions;
-- embed pathway-specific guide exports;
+- publish pathway-specific guide exports in the external browser payload;
 - generate `web_data/pathway_summary.json`; and
-- generate one HTML file named by `pathway_report.output_name`.
+- atomically generate one rendering shell named by
+  `pathway_report.output_name` after publishing its payload generation.
 
 GPML labels and identifiers are escaped in generated SVG attributes and text.
-The browser validates embedded SVG against the report's element and attribute
-allowlist before inserting it into the document.
+The browser validates payload-provided SVG against the report's element and
+attribute allowlist before inserting it into the document.
 
-The standalone Pathway HTML embeds one compact runtime projection: summary
-metadata/statistics, displayed pathway rows, pathway guide data, and generated
-SVG data. Large guide and SVG payloads occur once, while raw `matched_genes`
-and pathway mapping rows remain source artifacts rather than browser payload.
-The browser parses this embedded JSON once and reuses it for every interaction.
-`web_data/pathway_summary.json` retains the full machine-readable summary
-artifact independently of the HTML projection.
+The Pathway HTML is a browser-rendering shell. Its immutable
+`web_data/report_payloads/<namespace>-<generation>/core.js` supplies the runtime
+projection of summary metadata/statistics, displayed pathway rows, and generated
+SVG and pathway-guide data. The shared standard-report guide table remains in
+deferred `guides/*.js` chunks and loads only when the Guide section is opened.
+Raw `matched_genes` and pathway mapping rows remain regeneration sources rather
+than browser payloads.
+`web_data/pathway_summary.json` retains the complete machine-readable summary
+artifact independently of the browser projection and is not required for
+runtime rendering.
 
 The pathway report does not create a pathway SQLite database.
 
@@ -372,7 +422,11 @@ Key intermediate files include:
 - `query.pep`
 - `annotation_table.txt`
 - `annotation_classified.txt`
-- `annotation_with_guides_final.tsv`
+- `normalized_gene_guide_current.json`
+- `.normalized_gene_guide_generations/<uuid>/normalized_genes.tsv`
+- `.normalized_gene_guide_generations/<uuid>/normalized_guides.tsv`
+- `.normalized_gene_guide_generations/<uuid>/normalized_gene_guide_manifest.json`
+- `.normalized_gene_guide_generations/<uuid>/annotation_with_guides_final.tsv`
 - `annotation_with_guides_go.tsv`
 - `go_kfi_table.csv`
 - `go_kfi_stat.csv`
@@ -387,6 +441,10 @@ Key run/report files include:
 - `report.html` when enabled
 - `static/`
 - `web_data/summary.json`
+- `web_data/report_payloads/<namespace>-<generation>/core.js`
+- `web_data/report_payloads/<namespace>-<generation>/guides/*.js`
+- `web_data/report_payloads/<namespace>-<generation>/manifest.json`
+- `web_data/report_payloads/.committed/<namespace>-<generation>`
 - `web_data/twheel_data.db`
 - `web_data/report_generation_results.txt`
 
@@ -407,6 +465,19 @@ The report adds:
 - `<pathway_report.output_name>`
 - `web_data/pathway_summary.json`
 - shared `static/` assets
+- `web_data/report_payloads/<namespace>-<generation>/core.js`
+- shared-guide chunks in
+  `web_data/report_payloads/<namespace>-<generation>/guides/*.js`
+- `web_data/report_payloads/<namespace>-<generation>/manifest.json`
+- `web_data/report_payloads/.committed/<namespace>-<generation>`
+
+After a successful HTML commit, `summary.json` or `pathway_summary.json`
+records a `browser_payload` pointer to the generation manifest. The pointer is
+metadata; the HTML script path remains the browser's runtime entry point.
+
+Both report HTML files require the adjacent `static/` and `web_data/`
+directories when moved or archived. Their classic payload scripts support
+direct `file://` opening without a web server.
 
 ## 6. Report-source storage
 
@@ -425,9 +496,14 @@ published by creating an independent copy or filesystem clone, hashing it,
 renaming the completed snapshot, and atomically replacing the manifest under a
 file lock. Unreferenced snapshot directories are pruned.
 
-The standard namespace publishes the report inputs that exist. The pathway
-namespace requires the canonical table/mapping pair and additionally stages
-referenced GPML files.
+The standard namespace publishes the report inputs that exist. When all three
+normalized gene/guide artifacts are present, it snapshots them and omits the
+larger legacy compatibility table. The normalized gene table is cached once;
+the guide table is streamed for statistics and into bounded browser payload
+chunks without retaining a second all-guide projection. Report-source snapshots
+are inputs for regeneration and are not loaded by the browser. Older runs
+continue to stage and read the legacy table. The pathway namespace requires the
+canonical table/mapping pair and additionally stages referenced GPML files.
 
 Generator classes may load the last verified namespace when their configured
 `intermediate` directory does not exist. This is not currently exposed as a

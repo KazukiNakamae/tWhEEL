@@ -29,6 +29,7 @@ from modules.input_mode import (
     determine_protein_input_mode,
     get_configured_protein_path,
 )
+from modules.multi_gene_alignment import annotation_workspace_lock
 
 
 if hasattr(yaml, 'SafeLoader'):
@@ -325,6 +326,11 @@ class tWhEELPipeline:
         return True
     
     def run_step(self, step_name):
+        """Execute one step while holding the shared workspace generation lock."""
+        with annotation_workspace_lock(self.config['output']['intermediate']):
+            return self._run_step_locked(step_name)
+
+    def _run_step_locked(self, step_name):
         """Execute individual step"""
         self.logger.info(f"Starting step: {step_name}")
         start_time = datetime.now()
@@ -383,6 +389,11 @@ class tWhEELPipeline:
         return True
     
     def run(self):
+        """Execute the complete pipeline as one workspace generation."""
+        with annotation_workspace_lock(self.config['output']['intermediate']):
+            return self._run_locked()
+
+    def _run_locked(self):
         """Execute entire pipeline"""
         if not self.validate_inputs():
             return False

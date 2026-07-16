@@ -19,6 +19,8 @@ __pycache__/
 !src/docker/run_alignment_and_mask/run_alignment_and_mask.py
 !src/docker/count_go_parent_terms/go_slim_mapping.py
 !src/modules/fasta_search_cache.py
+!src/modules/multi_gene_alignment.py
+!src/modules/gene_guide_normalization.py
 !src/modules/input_mode.py
 !src/modules/docker_workspace.py
 !src/modules/transcript_mapping.py
@@ -26,4 +28,5 @@ __pycache__/
 !src/modules/pathway_analysis.py
 !src/modules/pathway_report_generator.py
 !src/modules/report_source_store.py
+!src/modules/report_payload_store.py
 !tests/*.py

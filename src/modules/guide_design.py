@@ -11,6 +11,9 @@ import gzip
 import shutil
 
 from .docker_workspace import DockerWorkspace
+from .gene_guide_normalization import (
+    publish_normalized_gene_guide_generation,
+)
 import csv
 from pathlib import Path
 
@@ -733,7 +736,7 @@ class GuideDesign:
                 'genome_path': genome_path,
                 'gene_files': gene_files,
                 'target_results': {},
-                'annotation_results': {}
+                'annotation_results': {},
             }
             
             # 各遺伝子タイプに対してガイド設計を実行
@@ -744,21 +747,47 @@ class GuideDesign:
                 # サイト特異的標的の抽出
                 specific_path = self.filter_site_specific_targets(targets_path, gene_type)
                 
-                # アノテーションとの結合
-                annotation_with_guides = self.merge_with_annotation(specific_path, gene_type)
-                
                 results['target_results'][gene_type] = {
                     'all_targets': targets_path,
                     'specific_targets': specific_path,
-                    'annotation_with_guides': annotation_with_guides
+                    'annotation_with_guides': None,
                 }
-            
-            # 最終的な結合テーブルの作成
-            multi_annotation = results['target_results'].get('multi_genes', {}).get('annotation_with_guides')
-            single_annotation = results['target_results'].get('single_genes', {}).get('annotation_with_guides')
-            
-            final_table = self.create_final_combined_table(multi_annotation, single_annotation)
+
+            # Publish one normalized generation after every target file has
+            # completed. This avoids copying the same guide payload into every
+            # contig-level annotation row during normal pipeline execution.
+            annotation_path = os.path.join(
+                self.intermediate_dir, 'annotation_classified.txt'
+            )
+            normalized_generation = publish_normalized_gene_guide_generation(
+                annotation_path=annotation_path,
+                output_dir=self.intermediate_dir,
+                multi_bed_path=results['target_results'].get(
+                    'multi_genes', {}
+                ).get('specific_targets'),
+                single_bed_path=results['target_results'].get(
+                    'single_genes', {}
+                ).get('specific_targets'),
+            )
+            results['annotation_results'] = normalized_generation
+            results['normalized_genes'] = normalized_generation[
+                'normalized_genes'
+            ]
+            results['normalized_guides'] = normalized_generation[
+                'normalized_guides'
+            ]
+            results['normalized_gene_guide_manifest'] = (
+                normalized_generation['normalized_gene_guide_manifest']
+            )
+            final_table = normalized_generation[
+                'annotation_with_guides_final'
+            ]
             results['final_table'] = final_table
+
+            # Keep the historical result key usable for callers that inspect
+            # GuideDesign.run(), while all new consumers use normalized paths.
+            for target_result in results['target_results'].values():
+                target_result['annotation_with_guides'] = final_table
             
             # 結果をファイルに保存
             results_file = os.path.join(self.intermediate_dir, 'guide_design_results.txt')
@@ -771,8 +800,17 @@ class GuideDesign:
                     f.write(f"=== {gene_type} ===\n")
                     f.write(f"All guide targets: {result['all_targets']}\n")
                     f.write(f"Specific target: {result['specific_targets']}\n")
-                    f.write(f"Annotation related: {result['annotation_with_guides']}\n\n")
+                    f.write(
+                        "Normalized annotation/guide generation: "
+                        f"{normalized_generation['generation_dir']}\n\n"
+                    )
                 
+                f.write(f"Normalized genes: {results['normalized_genes']}\n")
+                f.write(f"Normalized guides: {results['normalized_guides']}\n")
+                f.write(
+                    "Normalized manifest: "
+                    f"{results['normalized_gene_guide_manifest']}\n"
+                )
                 f.write(f"Final Join Table: {final_table}\n")
             
             self.logger.info(f"Save CRISPR guided design results: {results_file}")

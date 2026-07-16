@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     requests = None
 
 from .report_source_store import ReportSourceStore
+from .report_payload_store import ReportPayloadStore
 
 # CSVフィールドサイズ制限を増加
 csv.field_size_limit(1 << 30)
@@ -45,6 +46,14 @@ class ReportGenerator:
     """Report generation processing class"""
 
     DATABASE_SCHEMA_VERSION = 3
+    NORMALIZED_GENE_GUIDE_SOURCE_FILES = {
+        'normalized_genes': 'normalized_genes.tsv',
+        'normalized_guides': 'normalized_guides.tsv',
+        'normalized_gene_guide_manifest': 'normalized_gene_guide_manifest.json',
+    }
+    NORMALIZED_GENE_GUIDE_CURRENT_FILENAME = (
+        'normalized_gene_guide_current.json'
+    )
     REPORT_SOURCE_FILES = {
         'transcriptome': 'transcriptome.fa',
         'protein_sequences': 'query.pep',
@@ -58,6 +67,7 @@ class ReportGenerator:
         'go_parent_counts': 'go_parent_counts.csv',
         'go_parent_counts_image': 'go_parent_counts.png',
         'go_parent_counts_treemap_image': 'treemap_go_parent_counts.png',
+        **NORMALIZED_GENE_GUIDE_SOURCE_FILES,
     }
     
     def __init__(self, config):
@@ -73,6 +83,53 @@ class ReportGenerator:
         self.output_dir = self.config['output']['base_dir']
         self.web_data_dir = os.path.join(self.output_dir, 'web_data')
         self.report_source_store = ReportSourceStore(self.web_data_dir)
+        self.report_payload_store = ReportPayloadStore(
+            self.web_data_dir,
+            guide_chunk_rows=self.config.get('report', {}).get(
+                'guide_chunk_rows', 5000
+            ),
+        )
+        self._normalized_gene_guide_cache = None
+        self._normalized_guide_statistics_cache = None
+        self._normalized_guide_projection_cache = None
+
+    def _current_normalized_gene_guide_sources(self):
+        """Resolve the current immutable normalized generation, if present."""
+        pointer_path = Path(self.intermediate_dir) / (
+            self.NORMALIZED_GENE_GUIDE_CURRENT_FILENAME
+        )
+        if not os.path.lexists(pointer_path):
+            return {}
+        if not pointer_path.is_file():
+            raise RuntimeError(
+                f"Normalized gene/guide pointer is not a file: {pointer_path}"
+            )
+
+        # The pointer is authoritative. If it exists but is invalid, fail closed
+        # instead of silently mixing it with a legacy table from another run.
+        from .gene_guide_normalization import (
+            resolve_current_normalized_gene_guide_paths,
+        )
+
+        sources = resolve_current_normalized_gene_guide_paths(
+            self.intermediate_dir
+        )
+        required_keys = set(self.NORMALIZED_GENE_GUIDE_SOURCE_FILES)
+        if not isinstance(sources, dict) or set(sources) != required_keys:
+            raise ValueError(
+                "Normalized gene/guide pointer did not resolve the required "
+                "artifact set"
+            )
+        missing = sorted(
+            key for key, path in sources.items()
+            if not path or not os.path.isfile(path)
+        )
+        if missing:
+            raise FileNotFoundError(
+                "Normalized gene/guide pointer references missing artifacts: "
+                + ', '.join(missing)
+            )
+        return {key: str(path) for key, path in sources.items()}
 
     def _stage_report_sources(self, results):
         """Publish one immutable source generation for the standard report."""
@@ -123,6 +180,24 @@ class ReportGenerator:
             if source_path:
                 sources[key] = (source_path, filename)
 
+        normalized_keys = set(self.NORMALIZED_GENE_GUIDE_SOURCE_FILES)
+        available_normalized_keys = normalized_keys.intersection(sources)
+        if available_normalized_keys == normalized_keys:
+            # The normalized artifacts contain every gene and guide value needed
+            # to regenerate the report. Do not duplicate the potentially multi-GB
+            # legacy table in a new report-source snapshot.
+            sources.pop('final_annotation_guides', None)
+        elif available_normalized_keys:
+            # A normalized generation is usable only as one complete manifest-led
+            # set. Keep legacy regeneration working without publishing a partial
+            # canonical generation alongside it.
+            self.logger.warning(
+                "Ignoring incomplete normalized gene/guide report sources: "
+                + ', '.join(sorted(available_normalized_keys))
+            )
+            for key in available_normalized_keys:
+                sources.pop(key, None)
+
         results['report_data'] = self.report_source_store.publish_namespace(
             'normal', sources
         )
@@ -156,6 +231,7 @@ class ReportGenerator:
             'statistics': {},
             'data': {}
         }
+        results['data'].update(self._current_normalized_gene_guide_sources())
         
         # Collect result files from each step
         result_files = {
@@ -186,11 +262,20 @@ class ReportGenerator:
             'go_parent_counts': 'go_parent_counts.csv',
             'go_parent_counts_image': 'go_parent_counts.png',
             'go_parent_counts_treemap_image': 'treemap_go_parent_counts.png',
+            **self.NORMALIZED_GENE_GUIDE_SOURCE_FILES,
         }
         
         for name, filename in data_files.items():
+            if (
+                name in self.NORMALIZED_GENE_GUIDE_SOURCE_FILES
+                and name not in results['data']
+            ):
+                # A top-level filename is not authoritative. New normalized
+                # generations are selected only through the atomic current
+                # pointer resolved above.
+                continue
             filepath = os.path.join(self.intermediate_dir, filename)
-            if os.path.exists(filepath):
+            if name not in results['data'] and os.path.exists(filepath):
                 results['data'][name] = filepath
 
         self._stage_report_sources(results)
@@ -234,12 +319,40 @@ class ReportGenerator:
         
         # Annotation statistics
         try:
-            annotation_path = self._report_data_path(results, 'annotation_table')
-            if annotation_path and os.path.exists(annotation_path):
-                multi_count, single_count = self._count_gene_classifications(annotation_path)
+            normalized = self._normalized_gene_guide_data(results)
+            if normalized is not None:
+                multi_count = sum(
+                    gene.get('classification') == 'Multi'
+                    for gene in normalized['genes']
+                )
+                single_count = sum(
+                    gene.get('classification') == 'Single'
+                    for gene in normalized['genes']
+                )
+                if multi_count + single_count != len(normalized['genes']):
+                    raise ValueError(
+                        "Normalized genes contain an unsupported classification"
+                    )
                 stats['annotation']['multi_genes'] = multi_count
                 stats['annotation']['single_genes'] = single_count
                 stats['annotation']['total_genes'] = multi_count + single_count
+            else:
+                annotation_path = self._report_data_path(
+                    results, 'annotation_table'
+                )
+                if not annotation_path or not os.path.exists(annotation_path):
+                    annotation_path = self._report_data_path(
+                        results, 'final_annotation_guides'
+                    )
+                if annotation_path and os.path.exists(annotation_path):
+                    multi_count, single_count = (
+                        self._count_gene_classifications(annotation_path)
+                    )
+                    stats['annotation']['multi_genes'] = multi_count
+                    stats['annotation']['single_genes'] = single_count
+                    stats['annotation']['total_genes'] = (
+                        multi_count + single_count
+                    )
         except Exception as e:
             self.logger.error(f"Annotation statistics collection error: {e}")
             raise
@@ -289,6 +402,215 @@ class ReportGenerator:
             for target in str(value or '').split(',')
             if target.strip()
         ]
+
+    def _normalized_gene_guide_data(self, results):
+        """Load and cache one validated normalized gene/guide generation."""
+        source_paths = {
+            key: self._report_data_path(results, key)
+            for key in self.NORMALIZED_GENE_GUIDE_SOURCE_FILES
+        }
+        if not all(
+            path and os.path.isfile(path) for path in source_paths.values()
+        ):
+            return None
+
+        cache_key = tuple(
+            (
+                key,
+                os.path.realpath(source_paths[key]),
+                os.stat(source_paths[key]).st_size,
+                os.stat(source_paths[key]).st_mtime_ns,
+            )
+            for key in sorted(source_paths)
+        )
+        if (
+            self._normalized_gene_guide_cache is not None
+            and self._normalized_gene_guide_cache[0] == cache_key
+        ):
+            return self._normalized_gene_guide_cache[1]
+
+        # Import lazily so legacy report-only environments remain usable when no
+        # normalized artifacts exist. Guides remain streaming at this boundary;
+        # only the much smaller gene table is materialized here.
+        from .gene_guide_normalization import (
+            load_normalized_gene_data,
+        )
+
+        normalized = load_normalized_gene_data(
+            source_paths['normalized_genes'],
+            source_paths['normalized_guides'],
+            source_paths['normalized_gene_guide_manifest'],
+        )
+        if not isinstance(normalized, dict):
+            raise TypeError(
+                "Normalized gene/guide loader must return a dictionary"
+            )
+        genes = normalized.get('genes')
+        if not isinstance(genes, list):
+            raise TypeError(
+                "Normalized gene data must contain a gene list"
+            )
+
+        self._normalized_gene_guide_cache = (cache_key, normalized)
+        return normalized
+
+    def _normalized_guide_projection(self, results):
+        """Stream normalized guides once into the report's final projection."""
+        normalized = self._normalized_gene_guide_data(results)
+        if normalized is None:
+            return None
+        cache_key = self._normalized_gene_guide_cache[0]
+        if (
+            self._normalized_guide_projection_cache is not None
+            and self._normalized_guide_projection_cache[0] == cache_key
+        ):
+            return self._normalized_guide_projection_cache[1]
+
+        from .gene_guide_normalization import iter_normalized_guides
+
+        genes_by_id = {
+            gene['unique_id']: gene for gene in normalized['genes']
+        }
+        observed_counts = {unique_id: 0 for unique_id in genes_by_id}
+        stats = {
+            'total_guides': 0,
+            'site_specific_guides': 0,
+            'site_specific_multi_target': 0,
+            'site_specific_single_target': 0,
+        }
+        guide_data = []
+        paths = normalized['paths']
+        for guide in iter_normalized_guides(
+            paths['normalized_guides'],
+            paths['normalized_gene_guide_manifest'],
+            verify=False,
+        ):
+            unique_id = guide['unique_id']
+            gene = genes_by_id.get(unique_id)
+            if gene is None:
+                raise ValueError(
+                    "Normalized guide references an unknown gene: "
+                    f"{unique_id!r}"
+                )
+            observed_counts[unique_id] += 1
+            stats['total_guides'] += 1
+            if guide['mm0'] == 1 and guide['mm1_2'] == 0:
+                stats['site_specific_guides'] += 1
+                classification = gene['classification']
+                if classification == 'Multi':
+                    stats['site_specific_multi_target'] += 1
+                elif classification == 'Single':
+                    stats['site_specific_single_target'] += 1
+                else:
+                    raise ValueError(
+                        "Normalized guide references a gene with an "
+                        f"unsupported classification: {classification!r}"
+                    )
+
+            query_id = self._normalized_query_id_text(gene)
+            if not query_id:
+                query_id = str(
+                    gene.get('representative_query_id', '') or ''
+                )
+            guide_data.append({
+                'query_id': query_id,
+                'unique_id': unique_id,
+                'reference': guide['reference'],
+                'start': guide['start'],
+                'end': guide['end'],
+                'target_sequence': guide['guide_sequence'],
+                'mm0': guide['mm0'],
+                'mm1_2': guide['mm1_2'],
+                'off_target_score': (
+                    guide['off_target_score']
+                    if guide['off_target_score'] is not None else 0.0
+                ),
+                'strand': guide['strand'],
+            })
+
+        for unique_id, gene in genes_by_id.items():
+            if observed_counts[unique_id] != gene['guide_count']:
+                raise ValueError(
+                    f"Normalized guide_count mismatch for {unique_id}"
+                )
+        projection = {'statistics': stats, 'guides': guide_data}
+        if (
+            self._normalized_guide_statistics_cache is not None
+            and self._normalized_guide_statistics_cache[0] == cache_key
+            and self._normalized_guide_statistics_cache[1] != stats
+        ):
+            raise ValueError(
+                "Normalized guide statistics changed between validated reads"
+            )
+        self._normalized_guide_projection_cache = (cache_key, projection)
+        return projection
+
+    def _normalized_guide_statistics(self, results):
+        """Calculate normalized guide statistics without retaining guide rows."""
+        normalized = self._normalized_gene_guide_data(results)
+        if normalized is None:
+            return None
+        cache_key = self._normalized_gene_guide_cache[0]
+        if (
+            self._normalized_guide_statistics_cache is not None
+            and self._normalized_guide_statistics_cache[0] == cache_key
+        ):
+            return self._normalized_guide_statistics_cache[1]
+
+        from .gene_guide_normalization import iter_normalized_guides
+
+        genes_by_id = {
+            gene['unique_id']: gene for gene in normalized['genes']
+        }
+        observed_counts = {unique_id: 0 for unique_id in genes_by_id}
+        stats = {
+            'total_guides': 0,
+            'site_specific_guides': 0,
+            'site_specific_multi_target': 0,
+            'site_specific_single_target': 0,
+        }
+        paths = normalized['paths']
+        for guide in iter_normalized_guides(
+            paths['normalized_guides'],
+            paths['normalized_gene_guide_manifest'],
+            verify=False,
+        ):
+            unique_id = guide['unique_id']
+            gene = genes_by_id.get(unique_id)
+            if gene is None:
+                raise ValueError(
+                    "Normalized guide references an unknown gene: "
+                    f"{unique_id!r}"
+                )
+            observed_counts[unique_id] += 1
+            stats['total_guides'] += 1
+            if guide['mm0'] == 1 and guide['mm1_2'] == 0:
+                stats['site_specific_guides'] += 1
+                classification = gene['classification']
+                if classification == 'Multi':
+                    stats['site_specific_multi_target'] += 1
+                elif classification == 'Single':
+                    stats['site_specific_single_target'] += 1
+                else:
+                    raise ValueError(
+                        "Normalized guide references a gene with an "
+                        f"unsupported classification: {classification!r}"
+                    )
+        for unique_id, gene in genes_by_id.items():
+            if observed_counts[unique_id] != gene['guide_count']:
+                raise ValueError(
+                    f"Normalized guide_count mismatch for {unique_id}"
+                )
+        self._normalized_guide_statistics_cache = (cache_key, stats)
+        return stats
+
+    @staticmethod
+    def _normalized_query_id_text(gene):
+        """Return the legacy report display text for normalized query IDs."""
+        query_ids = gene.get('query_ids', [])
+        if not isinstance(query_ids, (list, tuple)):
+            raise TypeError("Normalized query_ids must be a list")
+        return '; '.join(str(query_id) for query_id in query_ids)
 
     @classmethod
     def _load_canonical_gene_rows(cls, annotation_path):
@@ -392,6 +714,10 @@ class ReportGenerator:
             'site_specific_multi_target': 0,
             'site_specific_single_target': 0
         }
+
+        normalized = self._normalized_gene_guide_data(results)
+        if normalized is not None:
+            return dict(self._normalized_guide_statistics(results))
         
         annotation_path = self._report_data_path(
             results, 'final_annotation_guides'
@@ -966,8 +1292,10 @@ class ReportGenerator:
         }
         
         json_path = os.path.join(self.web_data_dir, 'summary.json')
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        self._atomic_write_text(
+            json_path,
+            json.dumps(json_data, ensure_ascii=False, indent=2) + '\n',
+        )
         
         self.logger.info(f"Web data prepared: {db_path}, {json_path}")
         return db_path, json_path
@@ -1348,28 +1676,278 @@ class ReportGenerator:
             first_five = ", ".join(unique_genes[:5])
             remaining_count = len(unique_genes) - 5
             return f"{first_five}...and {remaining_count} more"
+
+    def _build_browser_report_core(self, results):
+        """Build the browser payload that is independent of guide chunks."""
+        return {
+            'timestamp': results['timestamp'],
+            'statistics': results['statistics'],
+            'config': {
+                'input': results['config']['input'],
+                'crispr': results['config']['crispr'],
+                'busco': results['config']['busco'],
+            },
+            'gene_annotation': self._load_gene_annotation_data_for_js(results),
+            'go_analysis': self._load_go_data_for_js(results),
+            'go_parent_counts': self._load_go_parent_counts_data_for_js(results),
+        }
+
+    def _iter_legacy_guide_rna_payload_rows(self, results):
+        """Yield legacy guide rows one association at a time."""
+        annotation_path = self._report_data_path(
+            results, 'final_annotation_guides'
+        )
+        if not annotation_path or not os.path.exists(annotation_path):
+            return
+
+        for row in self._load_canonical_gene_rows(annotation_path):
+            for target in self._split_guide_targets(
+                row.get('guide_targets', '')
+            ):
+                guide_parts = target.split('/')
+                if len(guide_parts) != 8:
+                    continue
+                yield {
+                    'query_id': row.get('query_id', ''),
+                    'unique_id': row['unique_id'],
+                    'reference': guide_parts[0],
+                    'start': (
+                        int(guide_parts[1])
+                        if guide_parts[1].isdigit() else 0
+                    ),
+                    'end': (
+                        int(guide_parts[2])
+                        if guide_parts[2].isdigit() else 0
+                    ),
+                    'target_sequence': guide_parts[3],
+                    'mm0': (
+                        int(guide_parts[4])
+                        if guide_parts[4].isdigit() else 0
+                    ),
+                    'mm1_2': (
+                        int(guide_parts[5])
+                        if guide_parts[5].isdigit() else 0
+                    ),
+                    'off_target_score': (
+                        float(guide_parts[6])
+                        if guide_parts[6].replace('.', '').isdigit()
+                        else 0.0
+                    ),
+                    'strand': guide_parts[7],
+                }
+
+    def _iter_guide_rna_data_for_payload(self, results):
+        """Yield browser guide rows without materializing normalized guides."""
+        normalized = self._normalized_gene_guide_data(results)
+        if normalized is None:
+            yield from self._iter_legacy_guide_rna_payload_rows(results)
+            return
+
+        from .gene_guide_normalization import iter_normalized_guides
+
+        genes_by_id = {
+            gene['unique_id']: gene for gene in normalized['genes']
+        }
+        observed_counts = {unique_id: 0 for unique_id in genes_by_id}
+        stats = {
+            'total_guides': 0,
+            'site_specific_guides': 0,
+            'site_specific_multi_target': 0,
+            'site_specific_single_target': 0,
+        }
+        paths = normalized['paths']
+        for guide in iter_normalized_guides(
+            paths['normalized_guides'],
+            paths['normalized_gene_guide_manifest'],
+            verify=False,
+        ):
+            unique_id = guide['unique_id']
+            gene = genes_by_id.get(unique_id)
+            if gene is None:
+                raise ValueError(
+                    "Normalized guide references an unknown gene: "
+                    f"{unique_id!r}"
+                )
+            observed_counts[unique_id] += 1
+            stats['total_guides'] += 1
+            if guide['mm0'] == 1 and guide['mm1_2'] == 0:
+                stats['site_specific_guides'] += 1
+                classification = gene['classification']
+                if classification == 'Multi':
+                    stats['site_specific_multi_target'] += 1
+                elif classification == 'Single':
+                    stats['site_specific_single_target'] += 1
+                else:
+                    raise ValueError(
+                        "Normalized guide references a gene with an "
+                        f"unsupported classification: {classification!r}"
+                    )
+
+            query_id = self._normalized_query_id_text(gene) or str(
+                gene.get('representative_query_id', '') or ''
+            )
+            yield {
+                'query_id': query_id,
+                'unique_id': unique_id,
+                'reference': guide['reference'],
+                'start': guide['start'],
+                'end': guide['end'],
+                'target_sequence': guide['guide_sequence'],
+                'mm0': guide['mm0'],
+                'mm1_2': guide['mm1_2'],
+                'off_target_score': (
+                    guide['off_target_score']
+                    if guide['off_target_score'] is not None else 0.0
+                ),
+                'strand': guide['strand'],
+            }
+
+        for unique_id, gene in genes_by_id.items():
+            if observed_counts[unique_id] != gene['guide_count']:
+                raise ValueError(
+                    f"Normalized guide_count mismatch for {unique_id}"
+                )
+        expected_stats = self._normalized_guide_statistics(results)
+        if stats != expected_stats:
+            raise ValueError(
+                "Normalized guide statistics changed between validated reads"
+            )
+
+    def publish_browser_payload(
+        self,
+        results,
+        *,
+        namespace='normal',
+        extra_globals=None,
+    ):
+        """Publish one immutable browser payload generation."""
+        published = self.report_payload_store.publish(
+            namespace,
+            self._build_browser_report_core(results),
+            self._iter_guide_rna_data_for_payload(results),
+            extra_globals=extra_globals,
+        )
+        results['browser_payload'] = published
+        return published
+
+    @staticmethod
+    def _atomic_write_text(path, content):
+        """Atomically replace a UTF-8 text artifact."""
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                dir=destination.parent,
+                prefix=f'.{destination.name}.',
+                suffix='.tmp',
+                delete=False,
+            ) as handle:
+                temporary_path = handle.name
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, destination)
+            temporary_path = None
+            ReportGenerator._fsync_directory(destination.parent)
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+    @staticmethod
+    def _atomic_copy_file(source, destination):
+        """Atomically replace a static artifact with a copied source file."""
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=destination.parent,
+            prefix=f'.{destination.name}.',
+            suffix='.tmp',
+        )
+        os.close(descriptor)
+        try:
+            shutil.copy2(source, temporary_path)
+            with open(temporary_path, 'rb') as handle:
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, destination)
+            temporary_path = None
+            ReportGenerator._fsync_directory(destination.parent)
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+    @staticmethod
+    def _fsync_directory(directory):
+        """Best-effort fsync for a directory containing atomic replacements."""
+        try:
+            descriptor = os.open(directory, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
     
     def generate_html_report(self, results):
-        """Generate HTML report"""
+        """Publish browser data, then atomically publish the HTML shell."""
         self.logger.info("Generating HTML report...")
         if not results.get('_report_sources_staged'):
             self._stage_report_sources(results)
         
-        # Create template files
-        self._create_html_template()
-        self._create_css_files()
-        self._create_js_files()
-        self._copy_static_assets(results)
-        
-        # Generate main HTML file
         html_path = os.path.join(self.output_dir, 'report.html')
-        
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(self._generate_html_content(results))
-        
+        with self.report_payload_store.publication_lock():
+            self._create_html_template()
+            self._create_css_files()
+            self._create_js_files()
+            self._copy_static_assets(results)
+            payload = self.publish_browser_payload(results)
+            html_content = self._generate_html_content(
+                results,
+                payload_script_src=payload['core_relative_path'],
+            )
+            self._atomic_write_text(html_path, html_content)
+            self._prune_missing_go_images(results)
+
+            summary_path = os.path.join(self.web_data_dir, 'summary.json')
+            if os.path.isfile(summary_path):
+                try:
+                    with open(summary_path, 'r', encoding='utf-8') as handle:
+                        summary = json.load(handle)
+                    summary['browser_payload'] = {
+                        'schema_version': (
+                            self.report_payload_store.SCHEMA_VERSION
+                        ),
+                        'namespace': 'normal',
+                        'generation_id': payload['generation_id'],
+                        'manifest': os.path.relpath(
+                            payload['manifest_path'], self.output_dir
+                        ).replace(os.sep, '/'),
+                    }
+                    self._atomic_write_text(
+                        summary_path,
+                        json.dumps(
+                            summary, ensure_ascii=False, indent=2
+                        ) + '\n',
+                    )
+                except (OSError, TypeError, ValueError) as error:
+                    self.logger.warning(
+                        "Report HTML is complete, but its summary payload "
+                        f"pointer could not be updated: {error}"
+                    )
+            self.report_payload_store.mark_committed(
+                'normal', payload['generation_id']
+            )
+            self.report_payload_store.cleanup_uncommitted_locked(
+                'normal', payload['generation_id']
+            )
+
         self.logger.info(f"HTML report generated: {html_path}")
         return html_path
-    
+
     def _copy_static_assets(self, results):
         """Copy static assets like images to output directory"""
         # Create img directory in output folder
@@ -1384,7 +1962,7 @@ class ReportGenerator:
         dst_logo = os.path.join(img_dir, 'logo.png')
         
         if src_logo.exists():
-            shutil.copy2(src_logo, dst_logo)
+            self._atomic_copy_file(src_logo, dst_logo)
             self.logger.info(f"Logo copied: {src_logo} -> {dst_logo}")
 
         go_images = {
@@ -1397,12 +1975,31 @@ class ReportGenerator:
             dst_image = os.path.join(img_dir, image_name)
 
             if src_image and os.path.exists(src_image):
-                shutil.copy2(src_image, dst_image)
+                self._atomic_copy_file(src_image, dst_image)
                 self.logger.info(f"GO image copied: {src_image} -> {dst_image}")
             else:
-                if os.path.exists(dst_image):
-                    os.unlink(dst_image)
                 self.logger.warning(f"GO image not found: {image_name}")
+
+    def _prune_missing_go_images(self, results):
+        """Remove stale optional images only after the new HTML is committed."""
+        image_dir = Path(self.output_dir) / 'static' / 'img'
+        go_images = {
+            'go_parent_counts_image': 'go_parent_counts.png',
+            'go_parent_counts_treemap_image': 'treemap_go_parent_counts.png',
+        }
+        for source_key, image_name in go_images.items():
+            source = self._report_data_path(results, source_key)
+            destination = image_dir / image_name
+            if source and os.path.exists(source):
+                continue
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                self.logger.warning(
+                    f"Could not remove stale GO image {destination}: {error}"
+                )
     
     def _create_html_template(self):
         """Create HTML template"""
@@ -1416,8 +2013,7 @@ class ReportGenerator:
         
         # Main CSS file
         main_css_path = os.path.join(css_dir, 'main.css')
-        with open(main_css_path, 'w', encoding='utf-8') as f:
-            f.write("""
+        main_css_content = """
 /* tWhEEL Report CSS - MultiQC Style */
 * {
     box-sizing: border-box;
@@ -2124,7 +2720,8 @@ html {
         display: none;
     }
 }
-""")
+"""
+        self._atomic_write_text(main_css_path, main_css_content)
     
     def _create_js_files(self):
         """Create JavaScript files in output directory"""
@@ -2134,14 +2731,15 @@ html {
         
         # Main JS file
         main_js_path = os.path.join(js_dir, 'main.js')
-        with open(main_js_path, 'w', encoding='utf-8') as f:
-            f.write("""
+        main_js_content = """
 // tWhEEL Report JavaScript - MultiQC Style
 
 class tWhEELReport {
     constructor() {
         this.currentSection = 'general-stats';
         this.data = null;
+        this.browserPayload = null;
+        this.guideDataPromise = null;
         this.proteins = [];
         this.filteredProteins = [];
         this.currentPage = 1;
@@ -2177,17 +2775,97 @@ class tWhEELReport {
     
     async loadData() {
         try {
-            // Load embedded data instead of fetching from external file
+            const externalPayload = window.__TWHEEL_REPORT_PAYLOAD__;
+            if (externalPayload && externalPayload.schema_version === 2) {
+                this.browserPayload = externalPayload;
+                this.data = {...externalPayload.data, guide_rna: null};
+                this.populateGeneralStats();
+                return;
+            }
+
+            // Keep old report directories readable after main.js is refreshed.
             const dataElement = document.getElementById('twheel-data');
             if (dataElement) {
                 this.data = JSON.parse(dataElement.textContent);
                 this.populateGeneralStats();
             } else {
-                throw new Error('Embedded data not found');
+                throw new Error('Browser payload not found');
             }
         } catch (error) {
-            console.error('Failed to load embedded data:', error);
-            this.showError('Failed to load data. Please check the report file.');
+            console.error('Failed to load browser payload:', error);
+            this.showError(
+                'Failed to load report data. Keep report.html, static/, and web_data/ together.'
+            );
+        }
+    }
+
+    loadPayloadScript(relativePath) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            const baseURL = this.browserPayload?.base_url || document.baseURI;
+            script.src = new URL(relativePath, baseURL).href;
+            script.async = true;
+            script.onload = () => {
+                script.remove();
+                resolve();
+            };
+            script.onerror = () => {
+                script.remove();
+                reject(new Error(`Failed to load report payload chunk: ${relativePath}`));
+            };
+            document.head.appendChild(script);
+        });
+    }
+
+    async ensureGuideDataLoaded() {
+        if (this.data && Array.isArray(this.data.guide_rna)) {
+            return this.data.guide_rna;
+        }
+        if (!this.browserPayload) {
+            throw new Error('Guide payload manifest is unavailable');
+        }
+        if (this.guideDataPromise) {
+            return this.guideDataPromise;
+        }
+
+        this.guideDataPromise = (async () => {
+            const guideManifest = this.browserPayload.guides || {};
+            const chunks = Array.isArray(guideManifest.chunks)
+                ? guideManifest.chunks
+                : [];
+            const guides = [];
+            window.__TWHEEL_REPORT_GUIDE_CHUNKS__ =
+                window.__TWHEEL_REPORT_GUIDE_CHUNKS__ || {};
+
+            for (const chunk of chunks) {
+                const registryKey = chunk.registry_key;
+                if (!Object.prototype.hasOwnProperty.call(
+                    window.__TWHEEL_REPORT_GUIDE_CHUNKS__, registryKey
+                )) {
+                    await this.loadPayloadScript(chunk.src);
+                }
+                const rows = window.__TWHEEL_REPORT_GUIDE_CHUNKS__[registryKey];
+                delete window.__TWHEEL_REPORT_GUIDE_CHUNKS__[registryKey];
+                if (!Array.isArray(rows) || rows.length !== chunk.row_count) {
+                    throw new Error(`Invalid guide payload chunk: ${chunk.src}`);
+                }
+                for (const row of rows) {
+                    guides.push(row);
+                }
+            }
+
+            if (guides.length !== (guideManifest.row_count || 0)) {
+                throw new Error('Guide payload row count mismatch');
+            }
+            this.data.guide_rna = guides;
+            return guides;
+        })();
+
+        try {
+            return await this.guideDataPromise;
+        } catch (error) {
+            this.guideDataPromise = null;
+            throw error;
         }
     }
     
@@ -2470,7 +3148,7 @@ class tWhEELReport {
                 this.sectionsLoaded.geneAnnotation = true;
                 
             } else {
-                geneTable.innerHTML = '<tr><td colspan="6" class="error">Gene annotation data not found in embedded data</td></tr>';
+                geneTable.innerHTML = '<tr><td colspan="6" class="error">Gene annotation data not found in browser payload</td></tr>';
             }
             
         } catch (error) {
@@ -2668,13 +3346,14 @@ class tWhEELReport {
     
     async loadGuideData() {
         console.log('Loading guide data...');
+        if (this.sectionsLoaded.guideRna) return;
+        this.sectionsLoaded.guideRna = true;
         try {
             const guideTable = document.querySelector('#guides-table tbody');
             if (!guideTable) return;
             
-            // Load embedded guide RNA data
-            if (this.data && this.data.guide_rna && Array.isArray(this.data.guide_rna)) {
-                const guideData = this.data.guide_rna;
+            const guideData = await this.ensureGuideDataLoaded();
+            if (Array.isArray(guideData)) {
                 
                 if (guideData.length === 0) {
                     guideTable.innerHTML = '<tr><td colspan="9" class="loading">No guide RNA data available</td></tr>';
@@ -2686,14 +3365,12 @@ class tWhEELReport {
                 // Store all entries, then render only the current page.
                 this.setupGuideTableFilters(guideData);
                 
-                // Mark section as loaded
-                this.sectionsLoaded.guideRna = true;
-                
             } else {
-                guideTable.innerHTML = '<tr><td colspan="9" class="error">Guide RNA data not found in embedded data</td></tr>';
+                guideTable.innerHTML = '<tr><td colspan="9" class="error">Guide RNA payload not found</td></tr>';
             }
             
         } catch (error) {
+            this.sectionsLoaded.guideRna = false;
             console.error('Failed to load guide data:', error);
             const guideTable = document.querySelector('#guides-table tbody');
             if (guideTable) {
@@ -2703,9 +3380,9 @@ class tWhEELReport {
     }
     
     setupGuideTableFilters(guideData) {
-        // Store original data for filtering and pagination
-        this.originalGuideData = [...guideData];
-        this.filteredGuideData = [...guideData];
+        // Keep one shared array until a filter produces a distinct result set.
+        this.originalGuideData = guideData;
+        this.filteredGuideData = guideData;
         this.currentGuidePage = 1;
         this.guidePageSize = 10;
         
@@ -2934,7 +3611,7 @@ class tWhEELReport {
                 this.sectionsLoaded.goAnalysis = true;
                 
             } else {
-                goTable.innerHTML = '<tr><td colspan="9" class="error">GO analysis data not found in embedded data</td></tr>';
+                goTable.innerHTML = '<tr><td colspan="9" class="error">GO analysis data not found in browser payload</td></tr>';
             }
             
         } catch (error) {
@@ -3265,7 +3942,7 @@ class tWhEELReport {
             console.log(`Loaded ${parentData.length} GO parent terms entries`);
             
         } else {
-            parentTable.innerHTML = '<tr><td colspan="3" class="error">GO parent terms data not found in embedded data</td></tr>';
+                parentTable.innerHTML = '<tr><td colspan="3" class="error">GO parent terms data not found in browser payload</td></tr>';
         }
     }
     
@@ -3570,7 +4247,7 @@ class tWhEELReport {
                 this.proteins = this.data.statistics.gene_prediction.proteins;
                 this.filteredProteins = [...this.proteins];
                 
-                // Update protein stats from embedded data
+                // Update protein stats from report data
                 if (this.data.statistics.gene_prediction.protein_stats) {
                     const proteinStats = this.data.statistics.gene_prediction.protein_stats;
                     this.updateStatCard('avg-protein-length', proteinStats.avg_length);
@@ -3920,6 +4597,8 @@ class tWhEELReport {
             // Parse gene names from the genes string
             const geneNames = goGenes.split(',').map(gene => gene.trim()).filter(gene => gene.length > 0);
             console.log('Found genes for GO term:', geneNames);
+
+            await this.ensureGuideDataLoaded();
             
             // Find guide RNAs for these genes
             const relevantGuides = [];
@@ -4076,10 +4755,14 @@ class tWhEELReport {
     }
 
     // Guide RNA CSV download functionality
-    downloadGuideRNACSV() {
+    async downloadGuideRNACSV() {
         console.log('Downloading Guide RNA CSV...');
         
         try {
+            const guides = await this.ensureGuideDataLoaded();
+            if (!this.filteredGuideData) {
+                this.filteredGuideData = guides;
+            }
             if (!this.filteredGuideData || this.filteredGuideData.length === 0) {
                 this.showError('No guide RNA data available for download');
                 return;
@@ -4265,33 +4948,27 @@ document.addEventListener('DOMContentLoaded', () => {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = tWhEELReport;
 }
-""")
+"""
+        self._atomic_write_text(main_js_path, main_js_content)
     
-    def _generate_html_content(self, results):
-        """Generate HTML content"""
+    def _generate_html_content(
+        self,
+        results,
+        guide_rna_data=None,
+        *,
+        payload_script_src=None,
+    ):
+        """Render the browser shell for an already published payload."""
+        if guide_rna_data is not None:
+            raise ValueError(
+                "guide_rna_data can no longer be embedded in report HTML"
+            )
+        if not payload_script_src:
+            raise ValueError(
+                "payload_script_src is required for the report HTML shell"
+            )
         stats = results['statistics']
-        
-        # Load Gene Annotation data for embedding
-        gene_annotation_data = self._load_gene_annotation_data_for_js(results)
-        # Load Guide RNA data for embedding
-        guide_rna_data = self._load_guide_rna_data_for_js(results)
-        # Load GO analysis data for embedding
-        go_analysis_data = self._load_go_data_for_js(results)
-        # Load GO parent counts data for embedding
-        go_parent_counts_data = self._load_go_parent_counts_data_for_js(results)
-        embedded_json = serialize_json_for_html_script({
-            'timestamp': results['timestamp'],
-            'statistics': results['statistics'],
-            'config': {
-                'input': results['config']['input'],
-                'crispr': results['config']['crispr'],
-                'busco': results['config']['busco']
-            },
-            'gene_annotation': gene_annotation_data,
-            'guide_rna': guide_rna_data,
-            'go_analysis': go_analysis_data,
-            'go_parent_counts': go_parent_counts_data
-        })
+        payload_script_src = self._escape_html(payload_script_src)
         
         html_content = f"""
 <!DOCTYPE html>
@@ -4303,8 +4980,8 @@ if (typeof module !== 'undefined' && module.exports) {
     <link rel="stylesheet" href="static/css/main.css">
 </head>
 <body>
-    <!-- Embedded Data -->
-    <script type="application/json" id="twheel-data">{embedded_json}</script>
+    <!-- Immutable browser payload; keep web_data beside this HTML file. -->
+    <script src="{payload_script_src}"></script>
 
     <div class="report-layout">
         <!-- Sidebar -->
@@ -5158,6 +5835,27 @@ body {{
     
     def _load_gene_annotation_data(self, results):
         """Load one report row per canonical gene group from a TSV file."""
+        normalized = self._normalized_gene_guide_data(results)
+        if normalized is not None:
+            gene_data = []
+            for gene in normalized['genes']:
+                query_id = self._normalized_query_id_text(gene)
+                if not query_id:
+                    query_id = str(
+                        gene.get('representative_query_id', '') or ''
+                    )
+                gene_data.append({
+                    'query_id': query_id,
+                    'subject_id': gene.get('subject_id', ''),
+                    'gene_name': gene.get('gene_name', ''),
+                    'classification': gene['classification'],
+                    'unique_id': gene['unique_id'],
+                    'description': gene.get('description', ''),
+                    'target_count': gene['guide_count'],
+                    'annotation_row_count': gene['annotation_row_count'],
+                })
+            return gene_data
+
         annotation_path = self._report_data_path(
             results, 'final_annotation_guides'
         )
@@ -5200,34 +5898,19 @@ body {{
     
     def _load_guide_rna_data_for_js(self, results):
         """Load each canonical gene-guide association once for JavaScript."""
-        annotation_path = self._report_data_path(
-            results, 'final_annotation_guides'
-        )
-        if not annotation_path or not os.path.exists(annotation_path):
-            return []
-        
-        guide_data = []
-        
+        normalized = self._normalized_gene_guide_data(results)
+        if normalized is not None:
+            guide_data = self._normalized_guide_projection(results)['guides']
+            self.logger.info(
+                f"Loaded {len(guide_data)} normalized guide RNA entries "
+                "for JavaScript embedding"
+            )
+            return guide_data
+
         try:
-            for row in self._load_canonical_gene_rows(annotation_path):
-                for target in self._split_guide_targets(
-                    row.get('guide_targets', '')
-                ):
-                    guide_parts = target.split('/')
-                    if len(guide_parts) == 8:
-                        guide_data.append({
-                            'query_id': row.get('query_id', ''),
-                            'unique_id': row['unique_id'],
-                            'reference': guide_parts[0],
-                            'start': int(guide_parts[1]) if guide_parts[1].isdigit() else 0,
-                            'end': int(guide_parts[2]) if guide_parts[2].isdigit() else 0,
-                            'target_sequence': guide_parts[3],
-                            'mm0': int(guide_parts[4]) if guide_parts[4].isdigit() else 0,
-                            'mm1_2': int(guide_parts[5]) if guide_parts[5].isdigit() else 0,
-                            'off_target_score': float(guide_parts[6]) if guide_parts[6].replace('.', '').isdigit() else 0.0,
-                            'strand': guide_parts[7]
-                        })
-                        
+            guide_data = list(
+                self._iter_legacy_guide_rna_payload_rows(results)
+            )
         except Exception as e:
             self.logger.error(f"Error loading guide RNA data for JS: {e}")
             raise

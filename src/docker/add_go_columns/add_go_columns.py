@@ -198,6 +198,16 @@ def add_go_columns(input_file, output_file):
                     header = next(reader)
                 except StopIteration as error:
                     raise ValueError("Input file is empty") from error
+                subject_id_columns = [
+                    index
+                    for index, column in enumerate(header)
+                    if column.strip() == 'subject_id'
+                ]
+                if len(subject_id_columns) != 1:
+                    raise ValueError(
+                        "Input must contain exactly one 'subject_id' column"
+                    )
+                subject_id_index = subject_id_columns[0]
                 new_header = header + ['GO_BP', 'GO_MF', 'GO_CC', 'GO_ALL']
                 writer.writerow(new_header)
 
@@ -216,8 +226,10 @@ def add_go_columns(input_file, output_file):
 
                     uniprot_ids = []
                     for row in chunk:
-                        if len(row) > 1:
-                            uniprot_ids.append(extract_uniprot_id(row[1]))
+                        if subject_id_index < len(row):
+                            uniprot_ids.append(
+                                extract_uniprot_id(row[subject_id_index])
+                            )
                         else:
                             uniprot_ids.append('')
 

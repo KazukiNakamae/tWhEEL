@@ -22,9 +22,6 @@ from datetime import datetime
 from pathlib import Path
 
 from .report_source_store import ReportSourceStore
-from .report_generator import serialize_json_for_html_script
-
-
 try:
     csv.field_size_limit(sys.maxsize)
 except OverflowError:
@@ -1543,19 +1540,21 @@ class PathwayReportGenerator:
             'pathway_svgs': pathway_svgs
         }
         
-        # JSON保存
+        # Keep the machine-readable summary independently atomic.
         json_path = os.path.join(self.web_data_dir, 'pathway_summary.json')
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, indent=2, ensure_ascii=False)
+        from .report_generator import ReportGenerator
+
+        ReportGenerator._atomic_write_text(
+            json_path,
+            json.dumps(summary_data, indent=2, ensure_ascii=False) + '\n',
+        )
         
         self.logger.info(f"Pathway summary JSON generation: {json_path}")
         return summary_data
     
-    def _create_legacy_pathway_html_template(
-        self, pathways, summary_data, pathway_genes=None
-    ):
-        """Build the pathway-only markup used by the unified report composer."""
-        # パスウェイデータを準備
+    @staticmethod
+    def _build_pathway_browser_data(pathways, summary_data):
+        """Build the pathway-specific projection published for the browser."""
         pathway_table_data = []
         for pathway in pathways:
             pathway_table_data.append({
@@ -1576,12 +1575,9 @@ class PathwayReportGenerator:
                 'targetable_type': pathway.get('targetable_type', 'Not targetable'),
                 'coverage_rate': float(pathway.get('coverage_rate', 0))
             })
-        
-        # Keep the standalone HTML self-contained without serializing the
-        # large guide and SVG payloads again inside ``summary``. Canonical gene
-        # details used by the browser already live in ``pathway_svgs`` and
-        # ``pathway_guide_data``; the raw mapping rows are report inputs only.
-        embedded_data = {
+
+        # Raw mapping rows remain report sources rather than browser data.
+        return {
             'summary': {
                 'timestamp': summary_data.get('timestamp', ''),
                 'statistics': summary_data.get('statistics', {}),
@@ -1590,7 +1586,11 @@ class PathwayReportGenerator:
             'pathway_guide_data': summary_data.get('pathway_guide_data', {}),
             'pathway_svgs': summary_data.get('pathway_svgs', {})
         }
-        
+
+    def _create_legacy_pathway_html_template(
+        self, pathways, summary_data, pathway_genes=None
+    ):
+        """Build pathway-only markup without embedding analysis payloads."""
         html_template = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1979,9 +1979,6 @@ class PathwayReportGenerator:
     </style>
 </head>
 <body>
-    <!-- データ埋め込み -->
-    <script type="application/json" id="pathway-data">{serialize_json_for_html_script(embedded_data)}</script>
-    
     <div class="report-layout">
         <!-- Sidebar -->
         <aside class="sidebar">
@@ -2191,11 +2188,25 @@ class PathwayReportGenerator:
             if (pathwayReportData !== null) {{
                 return pathwayReportData;
             }}
-            const dataElement = document.getElementById('pathway-data');
-            if (!dataElement) {{
-                throw new Error('Embedded data not found.');
+            const payload = window.__TWHEEL_PATHWAY_PAYLOAD__;
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {{
+                throw new Error('Pathway browser payload is unavailable.');
             }}
-            pathwayReportData = JSON.parse(dataElement.textContent);
+            if (
+                !payload.summary
+                || typeof payload.summary !== 'object'
+                || Array.isArray(payload.summary)
+                || !Array.isArray(payload.pathways)
+                || !payload.pathway_guide_data
+                || typeof payload.pathway_guide_data !== 'object'
+                || Array.isArray(payload.pathway_guide_data)
+                || !payload.pathway_svgs
+                || typeof payload.pathway_svgs !== 'object'
+                || Array.isArray(payload.pathway_svgs)
+            ) {{
+                throw new Error('Pathway browser payload has an invalid shape.');
+            }}
+            pathwayReportData = payload;
             return pathwayReportData;
         }}
 
@@ -2646,7 +2657,7 @@ class PathwayReportGenerator:
         
         function showPathwayGenes(pathwayId) {{
             try {{
-                // Retrieve pathway SVG information from embedded data
+                // Retrieve pathway SVG information from the browser payload
                 const data = getPathwayReportData();
                 const pathwaySvgData = data.pathway_svgs[pathwayId];
                 
@@ -2919,7 +2930,7 @@ class PathwayReportGenerator:
         }}
         
         function loadPathwayDiagram(pathwayId, pathway) {{
-            // 埋め込みデータから実際のパスウェイSVGデータを取得
+            // Read the requested pathway SVG from the browser payload.
             setTimeout(() => {{
                 try {{
                     const data = getPathwayReportData();
@@ -3010,7 +3021,7 @@ class PathwayReportGenerator:
         
         function showGeneDetails(geneName, geneDatabase, geneId, geneKey, sgdId, hasGuides) {{
             try {{
-                // 埋め込みデータからパスウェイガイドデータを取得
+                // Read pathway guide data from the browser payload.
                 const data = getPathwayReportData();
                 
                 // 現在表示中のパスウェイのガイドデータを取得
@@ -3266,7 +3277,7 @@ class PathwayReportGenerator:
         
         function downloadPathwayGuides(pathwayId) {{
             try {{
-                // 埋め込みデータからパスウェイガイドデータを取得
+                // Read pathway guide data from the browser payload.
                 const data = getPathwayReportData();
                 const pathwayGuideData = data.pathway_guide_data[pathwayId];
                 
@@ -3387,6 +3398,27 @@ class PathwayReportGenerator:
 
         generator = ReportGenerator(self._normalized_shared_report_config())
         return generator, generator.collect_all_results()
+
+    @staticmethod
+    def _pathway_shared_report_results(common_results):
+        """Remove GO-only inputs from the report data shared with PW output."""
+        base_results = dict(common_results)
+        base_results['data'] = dict(common_results.get('data', {}))
+        base_results['report_data'] = dict(
+            common_results.get('report_data', {})
+        )
+        base_results['statistics'] = dict(
+            common_results.get('statistics', {})
+        )
+        for key in (
+            'go_kfi_stat', 'go_kfi_table', 'go_reverse_lookup',
+            'go_parent_counts', 'go_parent_counts_image',
+            'go_parent_counts_treemap_image',
+        ):
+            base_results['data'].pop(key, None)
+            base_results['report_data'].pop(key, None)
+        base_results['statistics'].pop('go_analysis', None)
+        return base_results
 
     @staticmethod
     def _replace_report_block(content, start_marker, end_marker, replacement):
@@ -3636,8 +3668,9 @@ class PathwayReportGenerator:
     def create_pathway_html_template(
         self, pathways, summary_data, pathway_genes=None,
         common_results=None, common_report_generator=None,
+        payload_script_src=None,
     ):
-        """Compose PW-KFI content into the standard GO-KFI report shell."""
+        """Compose PW-KFI content into a standard browser-rendering shell."""
         legacy_html = self._create_legacy_pathway_html_template(
             pathways, summary_data, pathway_genes
         )
@@ -3647,33 +3680,16 @@ class PathwayReportGenerator:
                 self._collect_shared_report_context()
             )
 
-        # The shared shell needs common pipeline data, but not GO-only data.
-        base_results = dict(common_results)
-        base_results['data'] = dict(common_results.get('data', {}))
-        base_results['report_data'] = dict(
-            common_results.get('report_data', {})
-        )
-        base_results['statistics'] = dict(
-            common_results.get('statistics', {})
-        )
-        for key in (
-            'go_kfi_stat', 'go_kfi_table', 'go_reverse_lookup',
-            'go_parent_counts', 'go_parent_counts_image',
-            'go_parent_counts_treemap_image',
-        ):
-            base_results['data'].pop(key, None)
-            base_results['report_data'].pop(key, None)
-        base_results['statistics'].pop('go_analysis', None)
+        base_results = self._pathway_shared_report_results(common_results)
+        if payload_script_src is None:
+            raise ValueError(
+                'payload_script_src is required for the pathway HTML shell'
+            )
 
         report_html = common_report_generator._generate_html_content(
-            base_results
+            base_results,
+            payload_script_src=payload_script_src,
         )
-
-        data_start = legacy_html.index(
-            '<script type="application/json" id="pathway-data">'
-        )
-        data_end = legacy_html.index('</script>', data_start) + len('</script>')
-        pathway_data_script = legacy_html[data_start:data_end]
 
         modal_start = legacy_html.index('<div id="pathway-genes-modal"')
         script_start = legacy_html.index('<script>', modal_start)
@@ -3726,19 +3742,6 @@ class PathwayReportGenerator:
             f'<style id="pw-kfi-styles">{self._pathway_report_css()}</style>\n</head>',
             1,
         )
-        twheel_data_start = report_html.index(
-            '<script type="application/json" id="twheel-data">'
-        )
-        twheel_data_end = (
-            report_html.index('</script>', twheel_data_start)
-            + len('</script>')
-        )
-        report_html = (
-            report_html[:twheel_data_end]
-            + '\n    '
-            + pathway_data_script
-            + report_html[twheel_data_end:]
-        )
 
         main_script = '    <script src="static/js/main.js"></script>'
         if report_html.count(main_script) != 1:
@@ -3751,27 +3754,75 @@ class PathwayReportGenerator:
         return report_html
     
     def generate_pathway_html_report(self, pathways, pathway_genes, summary_data):
-        """Generate a pathway HTML report"""
+        """Publish pathway browser data, then atomically publish its shell."""
         common_generator, common_results = self._collect_shared_report_context()
-        common_generator._create_css_files()
-        common_generator._create_js_files()
-        common_generator._copy_static_assets(common_results)
 
-        html_content = self.create_pathway_html_template(
-            pathways,
-            summary_data,
-            pathway_genes,
-            common_results=common_results,
-            common_report_generator=common_generator,
+        base_results = self._pathway_shared_report_results(common_results)
+        pathway_browser_data = self._build_pathway_browser_data(
+            pathways, summary_data
         )
-        
-        # Write the unified report after all shared assets are ready.
-        report_name = self.pathway_report_config.get('output_name', 'pathway_report.html')
+        report_name = self.pathway_report_config.get(
+            'output_name', 'pathway_report.html'
+        )
         report_path = os.path.join(self.output_dir, report_name)
-        
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
+        with common_generator.report_payload_store.publication_lock():
+            common_generator._create_css_files()
+            common_generator._create_js_files()
+            common_generator._copy_static_assets(common_results)
+            payload = common_generator.publish_browser_payload(
+                base_results,
+                namespace='pathway',
+                extra_globals={
+                    '__TWHEEL_PATHWAY_PAYLOAD__': pathway_browser_data,
+                },
+            )
+            html_content = self.create_pathway_html_template(
+                pathways,
+                summary_data,
+                pathway_genes,
+                common_results=common_results,
+                common_report_generator=common_generator,
+                payload_script_src=payload['core_relative_path'],
+            )
+
+            # Publish the shell only after its immutable payload is complete.
+            common_generator._atomic_write_text(report_path, html_content)
+
+            summary_path = os.path.join(
+                self.web_data_dir, 'pathway_summary.json'
+            )
+            if os.path.isfile(summary_path):
+                try:
+                    with open(summary_path, 'r', encoding='utf-8') as handle:
+                        summary = json.load(handle)
+                    summary['browser_payload'] = {
+                        'schema_version': (
+                            common_generator.report_payload_store.SCHEMA_VERSION
+                        ),
+                        'namespace': 'pathway',
+                        'generation_id': payload['generation_id'],
+                        'manifest': os.path.relpath(
+                            payload['manifest_path'], self.output_dir
+                        ).replace(os.sep, '/'),
+                    }
+                    common_generator._atomic_write_text(
+                        summary_path,
+                        json.dumps(
+                            summary, ensure_ascii=False, indent=2
+                        ) + '\n',
+                    )
+                except (OSError, TypeError, ValueError) as error:
+                    self.logger.warning(
+                        "Pathway HTML is complete, but its summary payload "
+                        f"pointer could not be updated: {error}"
+                    )
+            common_generator.report_payload_store.mark_committed(
+                'pathway', payload['generation_id']
+            )
+            common_generator.report_payload_store.cleanup_uncommitted_locked(
+                'pathway', payload['generation_id']
+            )
+
         self.logger.info(f"Pathway HTML Report Generation: {report_path}")
         return report_path
     

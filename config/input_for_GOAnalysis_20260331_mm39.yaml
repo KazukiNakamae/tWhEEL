@@ -44,8 +44,8 @@ crispr:
 
 # GO analysis settings
 go_analysis:
-  add_go_image: "kazukinakamae/add-go-columns:v1.1"
-  compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.1"
+  add_go_image: "kazukinakamae/add-go-columns:v1.2"
+  compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.2"
   count_parent_image: "kazukinakamae/count_go_parent_terms:v1.1"
 
 # Report settings

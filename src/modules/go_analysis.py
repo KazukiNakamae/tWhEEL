@@ -37,25 +37,73 @@ class GOAnalysis:
         except Exception as e:
             self.logger.warning(f"Error during Docker image existence check: {e}")
             return False
+
+    def _image_supports_normalized_gene_guides(self, image_name):
+        """Return whether a helper image declares normalized schema support."""
+        label_template = (
+            '{{ index .Config.Labels '
+            '"org.twheel.normalized-gene-guide-schema" }}'
+        )
+        try:
+            result = subprocess.run(
+                [
+                    'docker', 'image', 'inspect', '--format',
+                    label_template, image_name,
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except Exception as error:
+            self.logger.warning(
+                "Unable to inspect GO helper image capability: "
+                f"{image_name}: {error}"
+            )
+            return False
+        return result.returncode == 0 and result.stdout.strip() == '1'
         
-    def build_docker_images(self):
+    def build_docker_images(self, require_normalized_gene_guides=False):
         """Build custom Docker images (with existing image check)"""
         self.logger.info("Start preparing your custom Docker image...")
         
         # 必要なDockerイメージのリスト
         docker_images = [
-            ('add_go_columns', self.config['go_analysis']['add_go_image']),
-            ('compute_go_kfi', self.config['go_analysis']['compute_kfi_image']),
-            ('count_go_parent_terms', self.config['go_analysis']['count_parent_image'])
+            (
+                'add_go_columns',
+                self.config['go_analysis']['add_go_image'],
+                True,
+            ),
+            (
+                'compute_go_kfi',
+                self.config['go_analysis']['compute_kfi_image'],
+                True,
+            ),
+            (
+                'count_go_parent_terms',
+                self.config['go_analysis']['count_parent_image'],
+                False,
+            ),
         ]
         
         build_needed = False
         
-        for folder_name, image_name in docker_images:
+        for folder_name, image_name, normalized_helper in docker_images:
             # 既存イメージのチェック
-            if self._check_docker_image_exists(image_name):
+            image_exists = self._check_docker_image_exists(image_name)
+            requires_capability = (
+                require_normalized_gene_guides and normalized_helper
+            )
+            capability_available = (
+                self._image_supports_normalized_gene_guides(image_name)
+                if image_exists and requires_capability else True
+            )
+            if image_exists and capability_available:
                 self.logger.info(f"A Docker image already exists (skip build).: {image_name}")
                 continue
+            if image_exists and requires_capability:
+                self.logger.info(
+                    "Rebuilding GO helper image without normalized schema "
+                    f"support: {image_name}"
+                )
             
             # イメージが存在しない場合、ビルドを実行
             docker_path = os.path.join(self.docker_dir, folder_name)
@@ -65,7 +113,7 @@ class GOAnalysis:
                 build_needed = True
                 
                 cmd = [
-                    "sudo", "docker", "build", 
+                    "docker", "build",
                     "-t", image_name,
                     docker_path
                 ]
@@ -83,6 +131,18 @@ class GOAnalysis:
                         self.logger.error("3. Consider using 'sudo docker build'.")
                     
                     raise RuntimeError(f"The Docker image build failed.: {image_name}")
+
+                if (
+                    requires_capability
+                    and not self._image_supports_normalized_gene_guides(
+                        image_name
+                    )
+                ):
+                    raise RuntimeError(
+                        "The rebuilt GO helper image does not declare "
+                        "normalized gene/guide schema support: "
+                        f"{image_name}"
+                    )
                 
                 self.logger.info(f"Docker image build complete: {image_name}")
             else:
@@ -420,17 +480,60 @@ class GOAnalysis:
             f"{sum(len(genes) for genes in go_to_genes.values())}"
         )
         return output_path
+
+    def _resolve_gene_annotation_input(self):
+        """Prefer the current normalized gene table over the legacy join."""
+        current_pointer = Path(self.intermediate_dir) / (
+            'normalized_gene_guide_current.json'
+        )
+        if os.path.lexists(str(current_pointer)):
+            # A published pointer is authoritative. Resolution validates its
+            # manifest and artifacts and deliberately propagates corruption
+            # instead of falling back to an unrelated legacy generation.
+            from .gene_guide_normalization import (
+                resolve_current_normalized_gene_guide_paths,
+            )
+
+            normalized_paths = resolve_current_normalized_gene_guide_paths(
+                self.intermediate_dir
+            )
+            input_path = normalized_paths.get('normalized_genes')
+            if not input_path or not os.path.isfile(input_path):
+                raise FileNotFoundError(
+                    "Current normalized gene table is unavailable: "
+                    f"{input_path!r}"
+                )
+            self.logger.info(
+                "Using normalized gene rows for GO annotation: "
+                f"{input_path}"
+            )
+            return input_path, 'normalized'
+
+        legacy_path = os.path.join(
+            self.intermediate_dir, 'annotation_with_guides_final.tsv'
+        )
+        if not os.path.isfile(legacy_path):
+            raise FileNotFoundError(
+                "Neither a normalized gene/guide generation nor the legacy "
+                f"annotation-guide table was found: {legacy_path}"
+            )
+        self.logger.info(
+            "Using legacy annotation/guide rows for GO annotation: "
+            f"{legacy_path}"
+        )
+        return legacy_path, 'legacy'
     
     def run(self):
         """Execute entire GO analysis"""
         try:
-            # 前段階の結果を確認
-            input_path = os.path.join(self.intermediate_dir, 'annotation_with_guides_final.tsv')
-            if not os.path.exists(input_path):
-                raise FileNotFoundError(f"Annotation-guide combined file not found.: {input_path}")
+            input_path, input_format = self._resolve_gene_annotation_input()
             
             # カスタムDockerイメージのビルド
-            self.build_docker_images()
+            self.build_docker_images(
+                require_normalized_gene_guides=(
+                    input_format == 'normalized'
+                )
+            )
             
             # GOアノテーションの追加
             go_annotated_path = self.add_go_annotations(input_path)
@@ -453,6 +556,7 @@ class GOAnalysis:
             # 結果の保存
             results = {
                 'input_path': input_path,
+                'input_format': input_format,
                 'go_annotated_path': go_annotated_path,
                 'kfi_table_path': kfi_table_path,
                 'kfi_stat_path': kfi_stat_path,

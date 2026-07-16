@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import sqlite3
 import sys
@@ -17,6 +18,39 @@ from src.modules.report_generator import ReportGenerator
 
 
 class ReportDatabaseTests(unittest.TestCase):
+    @staticmethod
+    def _browser_report_data(output_dir, report_name='report.html'):
+        """Load the external core payload and reconstruct deferred guides."""
+        output_dir = Path(output_dir)
+        html = (output_dir / report_name).read_text(encoding='utf-8')
+        match = re.search(
+            r'<script src="([^"]*report_payloads/[^"]+/core\.js)"></script>',
+            html,
+        )
+        if match is None:
+            raise AssertionError('Report HTML does not reference a payload')
+        core_path = output_dir / match.group(1)
+        core_source = core_path.read_text(encoding='utf-8')
+        marker = 'var payload = '
+        payload, _ = json.JSONDecoder().raw_decode(
+            core_source[core_source.index(marker) + len(marker):]
+        )
+        data = dict(payload['data'])
+        guides = []
+        for chunk in payload['guides']['chunks']:
+            chunk_source = (core_path.parent / chunk['src']).read_text(
+                encoding='utf-8'
+            )
+            assignment = chunk_source.index('] = ') + len('] = ')
+            rows, _ = json.JSONDecoder().raw_decode(
+                chunk_source[assignment:]
+            )
+            guides.extend(rows)
+        if len(guides) != payload['guides']['row_count']:
+            raise AssertionError('Guide payload row count mismatch')
+        data['guide_rna'] = guides
+        return html, payload, data
+
     @staticmethod
     def _config(temp_dir, force_rebuild=False):
         output_dir = temp_dir / 'output'
@@ -205,9 +239,31 @@ class ReportDatabaseTests(unittest.TestCase):
                 '_fetch_go_terms_from_api',
                 side_effect=self._term_info,
             ):
-                generator.run()
+                run_results = generator.run()
 
             publish_mock.assert_called_once()
+            summary = json.loads(
+                Path(run_results['json_path']).read_text(encoding='utf-8')
+            )
+            browser_pointer = summary['browser_payload']
+            self.assertEqual(browser_pointer['schema_version'], 2)
+            self.assertEqual(browser_pointer['namespace'], 'normal')
+            self.assertTrue(
+                (Path(generator.output_dir) / browser_pointer['manifest'])
+                .is_file()
+            )
+            self.assertTrue(
+                (
+                    Path(generator.web_data_dir)
+                    / 'report_payloads'
+                    / '.committed'
+                    / Path(run_results['browser_payload']['core_path']).parent.name
+                ).is_file()
+            )
+            report_html = Path(run_results['html_path']).read_text(
+                encoding='utf-8'
+            )
+            self.assertNotIn('type="application/json"', report_html)
 
     def test_go_identifier_change_rebuilds_without_stale_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -270,6 +326,253 @@ class ReportDatabaseTests(unittest.TestCase):
                 self._prepare(next_generator, next_results)
 
             rebuild_mock.assert_not_called()
+
+    def test_normalized_report_sources_replace_legacy_guide_table_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            legacy_path = temp_dir / 'annotation_with_guides_final.tsv'
+            genes_path = temp_dir / 'normalized_genes.tsv'
+            guides_path = temp_dir / 'normalized_guides.tsv'
+            manifest_path = temp_dir / 'normalized_gene_guide_manifest.json'
+            self._write_final_guides(legacy_path)
+            genes_path.write_text('normalized genes\n', encoding='utf-8')
+            guides_path.write_text('normalized guides\n', encoding='utf-8')
+            manifest_path.write_text('{}\n', encoding='utf-8')
+            results = self._results(
+                config,
+                final_annotation_guides=legacy_path,
+                normalized_genes=genes_path,
+                normalized_guides=guides_path,
+                normalized_gene_guide_manifest=manifest_path,
+            )
+
+            generator = ReportGenerator(config)
+            generator._stage_report_sources(results)
+
+            self.assertNotIn(
+                'final_annotation_guides', results['report_data']
+            )
+            self.assertEqual(
+                set(ReportGenerator.NORMALIZED_GENE_GUIDE_SOURCE_FILES),
+                set(results['report_data']),
+            )
+            for path in results['report_data'].values():
+                self.assertTrue(Path(path).is_file())
+
+    def test_partial_normalized_sources_keep_legacy_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            legacy_path = temp_dir / 'annotation_with_guides_final.tsv'
+            genes_path = temp_dir / 'normalized_genes.tsv'
+            self._write_final_guides(legacy_path)
+            genes_path.write_text('partial normalized data\n', encoding='utf-8')
+            results = self._results(
+                config,
+                final_annotation_guides=legacy_path,
+                normalized_genes=genes_path,
+            )
+
+            ReportGenerator(config)._stage_report_sources(results)
+
+            self.assertIn('final_annotation_guides', results['report_data'])
+            self.assertNotIn('normalized_genes', results['report_data'])
+
+    def test_normalized_gene_and_guide_data_are_loaded_only_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            genes_path = temp_dir / 'normalized_genes.tsv'
+            guides_path = temp_dir / 'normalized_guides.tsv'
+            manifest_path = temp_dir / 'normalized_gene_guide_manifest.json'
+            for path in (genes_path, guides_path, manifest_path):
+                path.write_text('cache-key input\n', encoding='utf-8')
+
+            genes = [
+                    {
+                        'unique_id': 'Multi_1',
+                        'classification': 'Multi',
+                        'subject_id': 'subject_multi',
+                        'gene_name': 'MULTI',
+                        'description': 'multi description',
+                        'representative_query_id': 'contig_a',
+                        'query_ids': ['contig_a', 'contig_b'],
+                        'annotation_row_count': 2,
+                        'guide_count': 2,
+                        'has_guides': True,
+                    },
+                    {
+                        'unique_id': 'Single_1',
+                        'classification': 'Single',
+                        'subject_id': 'subject_single',
+                        'gene_name': 'SINGLE',
+                        'description': 'single description',
+                        'representative_query_id': 'contig_c',
+                        'query_ids': ['contig_c'],
+                        'annotation_row_count': 1,
+                        'guide_count': 1,
+                        'has_guides': True,
+                    },
+                ]
+            guides = [
+                    {
+                        'unique_id': 'Multi_1',
+                        'reference': 'Multi_1',
+                        'start': 10,
+                        'end': 33,
+                        'guide_sequence': 'MULTI_A',
+                        'mm0': 1,
+                        'mm1_2': 0,
+                        'off_target_score': 1.0,
+                        'strand': '+',
+                    },
+                    {
+                        'unique_id': 'Multi_1',
+                        'reference': 'Multi_1',
+                        'start': 20,
+                        'end': 43,
+                        'guide_sequence': 'MULTI_B',
+                        'mm0': 1,
+                        'mm1_2': 0,
+                        'off_target_score': None,
+                        'strand': '',
+                    },
+                    {
+                        'unique_id': 'Single_1',
+                        'reference': 'Single_1',
+                        'start': 30,
+                        'end': 53,
+                        'guide_sequence': 'SINGLE',
+                        'mm0': 0,
+                        'mm1_2': 0,
+                        'off_target_score': 0.5,
+                        'strand': '-',
+                    },
+                ]
+            loader = mock.Mock(return_value={
+                'genes': genes,
+                'paths': {
+                    'normalized_genes': str(genes_path),
+                    'normalized_guides': str(guides_path),
+                    'normalized_gene_guide_manifest': str(manifest_path),
+                },
+            })
+            guide_iterator = mock.Mock(
+                side_effect=lambda *args, **kwargs: iter(guides)
+            )
+            normalization_module = types.ModuleType(
+                'src.modules.gene_guide_normalization'
+            )
+            normalization_module.load_normalized_gene_data = loader
+            normalization_module.iter_normalized_guides = guide_iterator
+            results = self._results(
+                config,
+                normalized_genes=genes_path,
+                normalized_guides=guides_path,
+                normalized_gene_guide_manifest=manifest_path,
+            )
+            generator = ReportGenerator(config)
+
+            with mock.patch.dict(sys.modules, {
+                'src.modules.gene_guide_normalization': normalization_module,
+            }):
+                statistics = generator._collect_statistics(results)
+                self.assertIsNone(
+                    generator._normalized_guide_projection_cache
+                )
+                gene_data = generator._load_gene_annotation_data(results)
+                guide_data = generator._load_guide_rna_data_for_js(results)
+
+            loader.assert_called_once_with(
+                str(genes_path), str(guides_path), str(manifest_path)
+            )
+            self.assertEqual(guide_iterator.call_count, 2)
+            guide_iterator.assert_has_calls([
+                mock.call(
+                    str(guides_path), str(manifest_path), verify=False
+                ),
+                mock.call(
+                    str(guides_path), str(manifest_path), verify=False
+                ),
+            ])
+            self.assertEqual(statistics['annotation'], {
+                'multi_genes': 1,
+                'single_genes': 1,
+                'total_genes': 2,
+            })
+            self.assertEqual(statistics['guide_design'], {
+                'total_guides': 3,
+                'site_specific_guides': 2,
+                'site_specific_multi_target': 2,
+                'site_specific_single_target': 0,
+            })
+            self.assertEqual(gene_data[0]['query_id'], 'contig_a; contig_b')
+            self.assertEqual(gene_data[0]['target_count'], 2)
+            self.assertEqual(guide_data[1]['off_target_score'], 0.0)
+            self.assertEqual(guide_data[2]['target_sequence'], 'SINGLE')
+
+    def test_current_normalized_pointer_resolves_exact_generation_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            intermediate = Path(config['output']['intermediate'])
+            pointer_path = (
+                intermediate
+                / ReportGenerator.NORMALIZED_GENE_GUIDE_CURRENT_FILENAME
+            )
+            pointer_path.write_text('{}\n', encoding='utf-8')
+            sources = {}
+            for key, filename in (
+                ReportGenerator.NORMALIZED_GENE_GUIDE_SOURCE_FILES.items()
+            ):
+                path = temp_dir / 'generation' / filename
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(f'{key}\n', encoding='utf-8')
+                sources[key] = str(path)
+
+            resolver = mock.Mock(return_value=sources)
+            normalization_module = types.ModuleType(
+                'src.modules.gene_guide_normalization'
+            )
+            normalization_module.resolve_current_normalized_gene_guide_paths = (
+                resolver
+            )
+            generator = ReportGenerator(config)
+
+            with mock.patch.dict(sys.modules, {
+                'src.modules.gene_guide_normalization': normalization_module,
+            }):
+                resolved = generator._current_normalized_gene_guide_sources()
+
+            resolver.assert_called_once_with(str(intermediate))
+            self.assertEqual(resolved, sources)
+
+    def test_invalid_current_normalized_pointer_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            intermediate = Path(config['output']['intermediate'])
+            (
+                intermediate
+                / ReportGenerator.NORMALIZED_GENE_GUIDE_CURRENT_FILENAME
+            ).write_text('{}\n', encoding='utf-8')
+            normalization_module = types.ModuleType(
+                'src.modules.gene_guide_normalization'
+            )
+            normalization_module.resolve_current_normalized_gene_guide_paths = (
+                mock.Mock(side_effect=ValueError('invalid current pointer'))
+            )
+
+            with mock.patch.dict(sys.modules, {
+                'src.modules.gene_guide_normalization': normalization_module,
+            }):
+                with self.assertRaisesRegex(
+                    ValueError, 'invalid current pointer'
+                ):
+                    ReportGenerator(
+                        config
+                    )._current_normalized_gene_guide_sources()
 
     def test_force_rebuild_replaces_cache_instead_of_appending(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -451,9 +754,13 @@ class ReportDatabaseTests(unittest.TestCase):
                 )
             )
             self.assertTrue(staged_guide.is_file())
+            expected_legacy_sources = (
+                set(ReportGenerator.REPORT_SOURCE_FILES)
+                - set(ReportGenerator.NORMALIZED_GENE_GUIDE_SOURCE_FILES)
+            )
             self.assertEqual(
                 set(first_results['report_data']),
-                set(ReportGenerator.REPORT_SOURCE_FILES),
+                expected_legacy_sources,
             )
             self.assertEqual(
                 {
@@ -462,16 +769,15 @@ class ReportDatabaseTests(unittest.TestCase):
                 },
                 {
                     f'normal.{key}'
-                    for key in ReportGenerator.REPORT_SOURCE_FILES
+                    for key in expected_legacy_sources
                 },
             )
             shutil.rmtree(intermediate)
 
             regenerated = ReportGenerator(config).run()
-            html = Path(regenerated['html_path']).read_text(encoding='utf-8')
-            marker = '<script type="application/json" id="twheel-data">'
-            embedded_json = html.split(marker, 1)[1].split('</script>', 1)[0]
-            embedded_data = json.loads(embedded_json)
+            html, browser_payload, embedded_data = (
+                self._browser_report_data(generator.output_dir)
+            )
 
             self.assertTrue(staged_guide.is_file())
             self.assertEqual(len(embedded_data['gene_annotation']), 1)
@@ -482,6 +788,8 @@ class ReportDatabaseTests(unittest.TestCase):
             self.assertEqual(
                 embedded_data['statistics'], first_statistics
             )
+            self.assertEqual(browser_payload['schema_version'], 2)
+            self.assertNotIn('twheel-data', html)
             self.assertEqual(
                 regenerated['statistics']['gene_prediction']['transcript_count'],
                 1,
@@ -520,7 +828,100 @@ class ReportDatabaseTests(unittest.TestCase):
             )
             self.assertFalse(intermediate.exists())
 
-    def test_html_embeds_all_guides_beyond_first_thousand(self):
+    def test_normalized_snapshot_regenerates_without_legacy_guide_table(self):
+        from src.modules.gene_guide_normalization import (
+            publish_normalized_gene_guide_generation,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            intermediate = Path(config['output']['intermediate'])
+            annotation_path = intermediate / 'annotation_classified.txt'
+            multi_bed_path = intermediate / 'multi.bed'
+            single_bed_path = intermediate / 'single.bed'
+            annotation_path.write_text(
+                '\t'.join([
+                    'query_id', 'subject_id', 'identity', 'length',
+                    'evalue', 'bit_score', 'description', 'gene_name',
+                    'classification', 'unique_id',
+                ])
+                + '\n'
+                + '\t'.join([
+                    'contig_a', 'subject_multi', '99', '100', '1e-30',
+                    '200', 'multi description', 'MULTI', 'Multi', 'Multi_1',
+                ])
+                + '\n'
+                + '\t'.join([
+                    'contig_b', 'subject_multi', '98', '90', '1e-20',
+                    '180', 'multi description', 'MULTI', 'Multi', 'Multi_1',
+                ])
+                + '\n'
+                + '\t'.join([
+                    'contig_c', 'subject_single', '97', '80', '1e-10',
+                    '160', 'single description', 'SINGLE', 'Single',
+                    'Single_1',
+                ])
+                + '\n',
+                encoding='utf-8',
+            )
+            multi_bed_path.write_text(
+                'Multi_1_aligned_consensus\t10\t33\tMULTI_GUIDE/1/0\t1.0\t+\n',
+                encoding='utf-8',
+            )
+            single_bed_path.write_text(
+                'Single_1\t20\t43\tSINGLE_GUIDE/1/0\t0.9\t-\n',
+                encoding='utf-8',
+            )
+            publish_normalized_gene_guide_generation(
+                annotation_path=annotation_path,
+                output_dir=intermediate,
+                multi_bed_path=multi_bed_path,
+                single_bed_path=single_bed_path,
+            )
+
+            first_generator = ReportGenerator(config)
+            first_results = first_generator.run()
+            self.assertIsNone(
+                first_generator._normalized_guide_projection_cache
+            )
+            self.assertNotIn(
+                'final_annotation_guides', first_results['report_data']
+            )
+            self.assertTrue(
+                set(ReportGenerator.NORMALIZED_GENE_GUIDE_SOURCE_FILES)
+                <= set(first_results['report_data'])
+            )
+            shutil.rmtree(intermediate)
+
+            regenerated_generator = ReportGenerator(config)
+            regenerated = regenerated_generator.run()
+            self.assertIsNone(
+                regenerated_generator._normalized_guide_projection_cache
+            )
+            html, browser_payload, embedded_data = (
+                self._browser_report_data(regenerated_generator.output_dir)
+            )
+
+            self.assertNotIn(
+                'final_annotation_guides', regenerated['report_data']
+            )
+            self.assertEqual(len(embedded_data['gene_annotation']), 2)
+            self.assertEqual(len(embedded_data['guide_rna']), 2)
+            self.assertEqual(
+                embedded_data['statistics']['annotation'],
+                {'multi_genes': 1, 'single_genes': 1, 'total_genes': 2},
+            )
+            self.assertEqual(
+                embedded_data['statistics']['guide_design'][
+                    'site_specific_guides'
+                ],
+                2,
+            )
+            self.assertEqual(browser_payload['guides']['row_count'], 2)
+            self.assertNotIn('twheel-data', html)
+
+    def test_payload_chunks_all_guides_beyond_first_thousand(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             config = self._config(temp_dir)
@@ -532,10 +933,19 @@ class ReportDatabaseTests(unittest.TestCase):
             generator = ReportGenerator(config)
 
             guide_data = generator._load_guide_rna_data_for_js(results)
-            html = generator._generate_html_content(results)
-            marker = '<script type="application/json" id="twheel-data">'
-            embedded_json = html.split(marker, 1)[1].split('</script>', 1)[0]
-            embedded_data = json.loads(embedded_json)
+            generator._create_js_files()
+            with generator.report_payload_store.publication_lock():
+                published = generator.publish_browser_payload(results)
+                html = generator._generate_html_content(
+                    results,
+                    payload_script_src=published['core_relative_path'],
+                )
+                generator._atomic_write_text(
+                    Path(generator.output_dir) / 'report.html', html
+                )
+            _, browser_payload, embedded_data = self._browser_report_data(
+                generator.output_dir
+            )
 
             self.assertEqual(len(guide_data), 1005)
             self.assertEqual(guide_data[-1]['reference'], 'Single_1004')
@@ -544,13 +954,81 @@ class ReportDatabaseTests(unittest.TestCase):
             self.assertEqual(
                 embedded_data['guide_rna'][-1]['reference'], 'Single_1004'
             )
+            self.assertNotIn('guide_rna', browser_payload['data'])
+            self.assertEqual(browser_payload['guides']['row_count'], 1005)
 
-            generator._create_js_files()
             javascript = (
                 Path(generator.output_dir) / 'static' / 'js' / 'main.js'
             ).read_text(encoding='utf-8')
             self.assertNotIn('const rows = guideData.map', javascript)
             self.assertIn('this.setupGuideTableFilters(guideData);', javascript)
+
+    def test_html_publish_failure_preserves_previous_payload_reference(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            config = self._config(temp_dir)
+            final_guides_path = temp_dir / 'final_guides.tsv'
+            self._write_final_guides(final_guides_path)
+            results = self._results(
+                config, final_annotation_guides=final_guides_path
+            )
+
+            first_generator = ReportGenerator(config)
+            report_path = Path(first_generator.generate_html_report(results))
+            first_html = report_path.read_bytes()
+            first_core = Path(results['browser_payload']['core_path'])
+            self.assertTrue(first_core.is_file())
+
+            second_generator = ReportGenerator(config)
+            original_atomic_write = second_generator._atomic_write_text
+
+            def fail_report_commit(path, content):
+                if Path(path).name == 'report.html':
+                    raise OSError('simulated report commit failure')
+                return original_atomic_write(path, content)
+
+            with mock.patch.object(
+                second_generator,
+                '_atomic_write_text',
+                side_effect=fail_report_commit,
+            ):
+                with self.assertRaisesRegex(
+                    OSError, 'simulated report commit failure'
+                ):
+                    second_generator.generate_html_report(results)
+
+            self.assertEqual(report_path.read_bytes(), first_html)
+            self.assertTrue(first_core.is_file())
+            failed_core = Path(results['browser_payload']['core_path'])
+            self.assertTrue(failed_core.is_file())
+            failed_marker = (
+                Path(second_generator.web_data_dir)
+                / 'report_payloads'
+                / '.committed'
+                / failed_core.parent.name
+            )
+            self.assertFalse(failed_marker.exists())
+
+            final_generator = ReportGenerator(config)
+            final_generator.generate_html_report(results)
+            normal_generations = [
+                path for path in (
+                    Path(final_generator.web_data_dir) / 'report_payloads'
+                ).iterdir()
+                if path.is_dir() and path.name.startswith('normal-')
+            ]
+            self.assertEqual(len(normal_generations), 2)
+            self.assertTrue(all(
+                (generation / 'manifest.json').is_file()
+                for generation in normal_generations
+            ))
+            self.assertFalse(failed_core.exists())
+            self.assertTrue(first_core.is_file())
+            _, payload, data = self._browser_report_data(
+                final_generator.output_dir
+            )
+            self.assertEqual(payload['guides']['row_count'], 1)
+            self.assertEqual(len(data['guide_rna']), 1)
 
     def test_multi_gene_contig_rows_are_counted_once_in_report_data(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:

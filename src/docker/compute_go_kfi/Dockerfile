@@ -1,5 +1,8 @@
 FROM python:3.9-slim
 
+LABEL org.twheel.helper="compute-go-kfi" \
+      org.twheel.normalized-gene-guide-schema="1"
+
 # 作業ディレクトリを設定
 WORKDIR /app
 

@@ -346,6 +346,67 @@ class AddGoColumnsTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]['GO_ALL'], 'GO:0006974')
 
+    def test_subject_id_is_resolved_by_header_name_for_canonical_gene_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            input_path = temp_dir / 'canonical_genes.tsv'
+            output_path = temp_dir / 'canonical_genes_go.tsv'
+            input_path.write_text(
+                'unique_id\tguide_count\tclassification\tsubject_id\n'
+                'Single_1\t2\tSingle\tsp|P04637|P53_HUMAN\n',
+                encoding='utf-8',
+            )
+            annotation = {
+                'GO_BP': 'GO:0006974',
+                'GO_MF': '',
+                'GO_CC': '',
+                'GO_ALL': 'GO:0006974',
+            }
+
+            with mock.patch.object(
+                add_go_columns,
+                'fetch_go_batch',
+                return_value={'P04637': annotation},
+            ) as fetch_mock, mock.patch.object(add_go_columns.time, 'sleep'):
+                add_go_columns.add_go_columns(input_path, output_path)
+
+            fetch_mock.assert_called_once_with(['P04637'])
+            with output_path.open(encoding='utf-8', newline='') as handle:
+                reader = csv.DictReader(handle, delimiter='\t')
+                rows = list(reader)
+            self.assertEqual(reader.fieldnames, [
+                'unique_id', 'guide_count', 'classification', 'subject_id',
+                'GO_BP', 'GO_MF', 'GO_CC', 'GO_ALL',
+            ])
+            self.assertEqual(rows[0]['unique_id'], 'Single_1')
+            self.assertEqual(rows[0]['guide_count'], '2')
+            self.assertEqual(rows[0]['GO_ALL'], 'GO:0006974')
+
+    def test_missing_subject_id_header_preserves_previous_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            temp_dir = Path(temp_dir_name)
+            input_path = temp_dir / 'input.tsv'
+            output_path = temp_dir / 'output.tsv'
+            input_path.write_text(
+                'unique_id\tguide_count\nSingle_1\t2\n',
+                encoding='utf-8',
+            )
+            output_path.write_text('previous output\n', encoding='utf-8')
+
+            with mock.patch.object(
+                add_go_columns, 'fetch_go_batch'
+            ) as fetch_mock:
+                with self.assertRaisesRegex(ValueError, "'subject_id' column"):
+                    add_go_columns.add_go_columns(input_path, output_path)
+
+            fetch_mock.assert_not_called()
+            self.assertEqual(
+                output_path.read_text(encoding='utf-8'), 'previous output\n'
+            )
+            self.assertEqual(
+                list(temp_dir.glob(f'.{output_path.name}.*.tmp')), []
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

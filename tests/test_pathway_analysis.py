@@ -2,7 +2,11 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from src.modules.gene_guide_normalization import (
+    publish_normalized_gene_guide_generation,
+)
 from src.modules.pathway_analysis import PathwayAnalysis
 from src.modules.pathway_report_generator import PathwayReportGenerator
 
@@ -160,6 +164,105 @@ class PathwayAnalysisIdentifierTests(unittest.TestCase):
         self.assertEqual(ensembl_match['matched_annotation_key'], 'ensembl_id')
         self.assertEqual(ensembl_match['matched_annotation_id'], 'YAL060W')
         self.assertEqual(ensembl_match['match_method'], 'exact_annotation_identifier')
+
+    @patch('src.modules.pathway_analysis.load_normalized_gene_data')
+    @patch(
+        'src.modules.pathway_analysis.'
+        'resolve_current_normalized_gene_guide_paths'
+    )
+    def test_prefers_normalized_gene_guide_data_without_legacy_table(
+        self, resolve_current, load_normalized
+    ):
+        paths = {
+            'normalized_genes': str(self.temp_dir / 'normalized_genes.tsv'),
+            'normalized_guides': str(self.temp_dir / 'normalized_guides.tsv'),
+            'normalized_gene_guide_manifest': str(
+                self.temp_dir / 'normalized_gene_guide_manifest.json'
+            ),
+        }
+        resolve_current.return_value = paths
+        gene = self.annotation_row()
+        gene.pop('guide_targets')
+        gene.pop('query_id')
+        gene.update({
+            'representative_query_id': 'query-a',
+            'query_ids': ['query-z', 'query-a'],
+            'annotation_row_count': 2,
+            'guide_count': 2,
+        })
+        load_normalized.return_value = {
+            'genes': [gene],
+        }
+
+        annotation_data = PathwayAnalysis(
+            self.config
+        ).load_annotation_results()
+
+        record = annotation_data['by_subject_id']['SGDID:S000000056']
+        self.assertEqual(record['annotation_query_ids'], ['query-a', 'query-z'])
+        self.assertEqual(record['annotation_row_count'], 2)
+        self.assertEqual(record['guide_targets'], '')
+        self.assertEqual(record['guide_count'], 2)
+        resolve_current.assert_called_once_with(str(self.temp_dir))
+        load_normalized.assert_called_once_with(
+            paths['normalized_genes'],
+            paths['normalized_guides'],
+            paths['normalized_gene_guide_manifest'],
+            verify=False,
+        )
+
+    def test_invalid_normalized_current_fails_closed_despite_legacy_table(
+        self
+    ):
+        self.write_annotation([self.annotation_row()])
+        (self.temp_dir / 'normalized_gene_guide_current.json').write_text(
+            '{invalid json', encoding='utf-8'
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, 'Cannot read normalized generation pointer'
+        ):
+            PathwayAnalysis(self.config).load_annotation_results()
+
+    def test_loads_published_normalized_generation_end_to_end(self):
+        annotation_path = self.temp_dir / 'annotation_classified.txt'
+        source_columns = ANNOTATION_COLUMNS[:-1]
+        with annotation_path.open(
+            'w', encoding='utf-8', newline=''
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=source_columns,
+                delimiter='\t',
+                extrasaction='ignore',
+            )
+            writer.writeheader()
+            writer.writerow(self.annotation_row())
+        single_bed_path = self.temp_dir / 'single_guides.bed'
+        single_bed_path.write_text(
+            'Single_0000000001\t1\t23\tACGT/0/0\t42.5\t+\n',
+            encoding='utf-8',
+        )
+        publish_normalized_gene_guide_generation(
+            annotation_path,
+            self.temp_dir,
+            single_bed_path=single_bed_path,
+        )
+
+        self.write_gpml([('SGD', 'S000000056', 'BDH1')])
+        pathways = PathwayAnalysis(self.config).process_all_pathways()
+
+        self.assertEqual(len(pathways), 1)
+        record = pathways[0]['matched_genes'][0]
+        self.assertEqual(record['annotation_query_ids'], ['query-1'])
+        self.assertEqual(record['guide_count'], 1)
+        self.assertEqual(
+            record['guide_targets'],
+            'Single_0000000001/1/23/ACGT/0/0/42.5/+',
+        )
+        self.assertFalse(
+            (self.temp_dir / 'annotation_with_guides_final.tsv').exists()
+        )
 
     def test_uses_exact_sgd_fasta_cross_reference_but_not_gene_name(self):
         legacy_columns = [

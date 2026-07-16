@@ -14,6 +14,12 @@ import shutil
 
 from .fasta_search_cache import FastaSearchCache
 from .input_mode import EXISTING_PROTEIN_MODE, determine_protein_input_mode
+from .multi_gene_alignment import (
+    MultiGeneAlignmentRunner,
+    annotation_workspace_lock,
+    clear_multi_gene_artifacts,
+    clear_single_gene_artifacts,
+)
 from .transcript_mapping import (
     TranscriptMappingError,
     load_mapping_file,
@@ -565,6 +571,11 @@ class Sgd_annotation:
         return "unknown"
     
     def extract_gene_sequences(self, classified_path):
+        """Extract one locked generation of Multi/Single gene sequences."""
+        with annotation_workspace_lock(self.intermediate_dir):
+            return self._extract_gene_sequences_locked(classified_path)
+
+    def _extract_gene_sequences_locked(self, classified_path):
         """Extract gene sequences for Multi/Single genes"""
         self.logger.info("Gene sequence extraction started....")
         
@@ -617,6 +628,8 @@ class Sgd_annotation:
             
             # Execute alignment process
             self._run_alignment_process(multi_genes)
+        else:
+            clear_multi_gene_artifacts(self.intermediate_dir)
         
         # Single遺伝子の配列抽出
         if single_genes:
@@ -627,6 +640,8 @@ class Sgd_annotation:
                 single_genes,
                 sequences=transcript_sequences,
             )
+        else:
+            clear_single_gene_artifacts(self.intermediate_dir)
         
         self.logger.info("Gene sequence extraction is complete.")
         
@@ -786,7 +801,14 @@ class Sgd_annotation:
         
         # multi_genesディレクトリを作成
         multi_genes_dir = os.path.join(self.intermediate_dir, 'multi_genes')
-        Path(multi_genes_dir).mkdir(parents=True, exist_ok=True)
+        multi_genes_dir_path = Path(multi_genes_dir)
+        multi_genes_dir_path.mkdir(parents=True, exist_ok=True)
+
+        # Do not let groups from an older classification enter this run.
+        expected_group_ids = set(multi_genes)
+        for previous_group in multi_genes_dir_path.glob('*.fa'):
+            if previous_group.stem not in expected_group_ids:
+                previous_group.unlink()
         
         if sequences is None:
             sequences = self._load_transcript_sequences(transcriptome_path)
@@ -811,95 +833,21 @@ class Sgd_annotation:
         self.logger.info(f"Multi-gene individual file creation complete.: {len(multi_genes)} files")
     
     def _run_alignment_process(self, expected_multi_ids=None):
-        """Execute alignment process"""
-        self.logger.info("Initiating multi-gene alignment processing....")
-        
-        multi_genes_dir = os.path.join(self.intermediate_dir, 'multi_genes')
-        multi_genes_aligned_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned')
-        
-        # 出力ディレクトリを作成
-        aligned_dir_path = Path(multi_genes_aligned_dir)
-        aligned_dir_path.mkdir(parents=True, exist_ok=True)
-        for stale_output in aligned_dir_path.glob('*_aligned_consensus.fa'):
-            stale_output.unlink()
-        
-        # Dockerイメージをビルド
-        docker_build_dir = "src/docker/run_alignment_and_mask"
-        self.logger.info("Building the run_alignment_and_mask Docker image....")
-        
-        build_cmd = [
-            "sudo", "docker", "build",
-            "-t", "run_alignment_and_mask/v1.0",
-            docker_build_dir
-        ]
-        
-        build_result = subprocess.run(build_cmd, capture_output=True, text=True)
-        if build_result.returncode != 0:
-            self.logger.error(f"Docker build error: {build_result.stderr}")
-            raise RuntimeError("The Docker image build failed.")
-        
-        self.logger.info("Dockerイメージビルド完了")
-        
-        # Execute alignment process（intermediate_dirを基準に相対パスで指定）
-        multi_genes_rel_dir = os.path.relpath(multi_genes_dir, self.intermediate_dir)
-        multi_genes_aligned_rel_dir = os.path.relpath(multi_genes_aligned_dir, self.intermediate_dir)
-        
-        alignment_cmd = [
-            "docker", "run",
-            "-m", "4G",
-            "-v", f"{os.path.abspath(self.intermediate_dir)}:/data",
-            "-w", "/data",
-            "--rm",
-            "run_alignment_and_mask/v1.0",
-            "python", "/app/run_alignment_and_mask.py",
-            "-i", multi_genes_rel_dir,
-            "-o", multi_genes_aligned_rel_dir
-        ]
-        
-        self.logger.debug(f"Alignment execution command: {' '.join(alignment_cmd)}")
-        
-        alignment_result = subprocess.run(alignment_cmd, capture_output=True, text=True)
-        if alignment_result.returncode != 0:
-            self.logger.error(f"Alignment processing error: {alignment_result.stderr}")
-            raise RuntimeError("Alignment process failed.")
-        
-        # 実行結果をログ出力
-        if alignment_result.stdout:
-            self.logger.info(f"Alignment processing output:\n{alignment_result.stdout}")
-        
-        self.logger.info("Multi-gene alignment processing completed.")
-        
-        # 結果ファイル数を確認
-        aligned_files = sorted(
-            aligned_dir_path.glob("*_aligned_consensus.fa")
+        """Run cached, bounded-parallel alignment for all Multi genes."""
+        runner = MultiGeneAlignmentRunner(
+            self.intermediate_dir,
+            self.config,
+            self.logger,
+            run_command=subprocess.run,
         )
-        self.logger.info(f"Number of aligned files generated: {len(aligned_files)}")
-
-        if expected_multi_ids is None:
-            expected_multi_ids = {
-                path.stem for path in Path(multi_genes_dir).glob('*.fa')
-            }
-        expected_multi_ids = set(expected_multi_ids)
-        observed_multi_ids = {
-            path.name[:-len('_aligned_consensus.fa')]
-            for path in aligned_files
-        }
-        missing_multi_ids = sorted(expected_multi_ids - observed_multi_ids)
-        unexpected_multi_ids = sorted(observed_multi_ids - expected_multi_ids)
-        if missing_multi_ids or unexpected_multi_ids:
-            details = []
-            if missing_multi_ids:
-                details.append('missing=' + ','.join(missing_multi_ids))
-            if unexpected_multi_ids:
-                details.append(
-                    'unexpected=' + ','.join(unexpected_multi_ids)
-                )
-            raise RuntimeError(
-                "Multi-gene alignment outputs do not match input groups: "
-                + '; '.join(details)
-            )
+        return runner.run(expected_multi_ids)
     
     def run(self):
+        """Execute one serialized annotation generation."""
+        with annotation_workspace_lock(self.intermediate_dir):
+            return self._run_locked()
+
+    def _run_locked(self):
         """Execute entire annotation processing"""
         try:
             # 前段階の結果を確認

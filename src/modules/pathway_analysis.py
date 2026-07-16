@@ -12,7 +12,14 @@ import csv
 import gzip
 import sys
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
+
+from .gene_guide_normalization import (
+    iter_normalized_guides,
+    load_normalized_gene_data,
+    resolve_current_normalized_gene_guide_paths,
+)
 
 
 try:
@@ -354,10 +361,12 @@ class PathwayAnalysis:
 
     def load_annotation_results(self):
         """Load annotation results into strict database-specific indexes."""
-        annotation_file = os.path.join(self.intermediate_dir, 'annotation_with_guides_final.tsv')
-        
-        if not os.path.exists(annotation_file):
-            raise FileNotFoundError(f"Annotation result file not found.: {annotation_file}")
+        legacy_annotation_file = os.path.join(
+            self.intermediate_dir, 'annotation_with_guides_final.tsv'
+        )
+        normalized_paths = resolve_current_normalized_gene_guide_paths(
+            self.intermediate_dir
+        )
 
         self.annotation_identifier_issues = []
         database_configs = self._target_database_configs()
@@ -371,6 +380,7 @@ class PathwayAnalysis:
             'subject_failures': {},
             'subject_id_column_available': False,
             'cross_references': {},
+            'normalized_guide_source': None,
         }
 
         candidate_records = []
@@ -403,9 +413,60 @@ class PathwayAnalysis:
                 issue_keys.add(key)
                 self.annotation_identifier_issues.append(issue)
 
-        with open(annotation_file, 'r', encoding='utf-8', newline='') as f:
-            reader = csv.DictReader(f, delimiter='\t')
-            fieldnames = set(reader.fieldnames or [])
+        with ExitStack() as source_stack:
+            if not normalized_paths:
+                annotation_file = legacy_annotation_file
+                if not os.path.exists(annotation_file):
+                    raise FileNotFoundError(
+                        f"Annotation result file not found.: {annotation_file}"
+                    )
+                handle = source_stack.enter_context(open(
+                    annotation_file, 'r', encoding='utf-8', newline=''
+                ))
+                source_rows = csv.DictReader(handle, delimiter='\t')
+                fieldnames = set(source_rows.fieldnames or [])
+            else:
+                annotation_file = normalized_paths['normalized_genes']
+                normalized_data = load_normalized_gene_data(
+                    normalized_paths['normalized_genes'],
+                    normalized_paths['normalized_guides'],
+                    normalized_paths['normalized_gene_guide_manifest'],
+                    verify=False,
+                )
+                annotation_data['normalized_guide_source'] = dict(
+                    normalized_paths
+                )
+                normalized_rows = []
+                for gene in normalized_data['genes']:
+                    row = dict(gene)
+                    unique_id = str(row.get('unique_id', '') or '').strip()
+                    query_ids = sorted({
+                        str(query_id or '').strip()
+                        for query_id in row.get('query_ids', [])
+                        if str(query_id or '').strip()
+                    })
+                    row.update({
+                        'query_id': (
+                            str(row.get('query_id', '') or '').strip()
+                            or str(
+                                row.get('representative_query_id', '') or ''
+                            ).strip()
+                            or (query_ids[0] if query_ids else '')
+                        ),
+                        'guide_targets': '',
+                        '_normalized_query_ids': query_ids,
+                        '_normalized_guide_count': int(
+                            row.get('guide_count', 0)
+                        ),
+                    })
+                    normalized_rows.append(row)
+                source_rows = iter(normalized_rows)
+                fieldnames = {
+                    field
+                    for row in normalized_rows
+                    for field in row
+                }
+
             annotation_data['subject_id_column_available'] = 'subject_id' in fieldnames
 
             for database, db_config in database_configs.items():
@@ -422,7 +483,7 @@ class PathwayAnalysis:
                         'reason': 'annotation_identifier_column_unavailable',
                     })
 
-            for row_number, row in enumerate(reader, 2):
+            for row_number, row in enumerate(source_rows, 2):
                 unique_id = (row.get('unique_id') or '').strip()
                 subject_id = (row.get('subject_id') or '').strip()
                 if not unique_id or not subject_id:
@@ -437,6 +498,14 @@ class PathwayAnalysis:
                     continue
 
                 guides = self._guide_entries(row.get('guide_targets', ''))
+                normalized_guide_count = row.get(
+                    '_normalized_guide_count'
+                )
+                guide_count = (
+                    int(normalized_guide_count)
+                    if normalized_guide_count is not None
+                    else len(guides)
+                )
                 annotation_source_database = (
                     row.get('annotation_source_database') or ''
                 ).strip()
@@ -455,11 +524,15 @@ class PathwayAnalysis:
                     'description': (row.get('description') or '').strip(),
                     'annotation_source_database': annotation_source_database,
                     'guide_targets': ','.join(guides),
-                    'guide_count': len(guides),
-                    'has_guides': bool(guides),
-                    'annotation_query_ids': [
-                        (row.get('query_id') or '').strip()
-                    ] if (row.get('query_id') or '').strip() else [],
+                    'guide_count': guide_count,
+                    'has_guides': guide_count > 0,
+                    'annotation_query_ids': sorted({
+                        str(query_id or '').strip()
+                        for query_id in row.get(
+                            '_normalized_query_ids', [row.get('query_id', '')]
+                        )
+                        if str(query_id or '').strip()
+                    }),
                     '_annotation_row_number': row_number,
                 })
 
@@ -536,9 +609,10 @@ class PathwayAnalysis:
                 if len(nonempty_values(subject_records, field)) > 1
             }
             query_ids = sorted({
-                str(record.get('query_id', '') or '').strip()
+                str(query_id or '').strip()
                 for record in subject_records
-                if str(record.get('query_id', '') or '').strip()
+                for query_id in record.get('annotation_query_ids', [])
+                if str(query_id or '').strip()
             })
             unique_ids = nonempty_values(subject_records, 'unique_id')
             if conflicts:
@@ -578,16 +652,35 @@ class PathwayAnalysis:
                 for record in subject_records
                 for guide in self._guide_entries(record.get('guide_targets', ''))
             })
+            normalized_guide_counts = {
+                int(record['_normalized_guide_count'])
+                for record in subject_records
+                if record.get('_normalized_guide_count') is not None
+            }
+            if len(normalized_guide_counts) > 1:
+                raise ValueError(
+                    f"Conflicting normalized guide counts for {subject_id}: "
+                    f"{sorted(normalized_guide_counts)}"
+                )
+            aggregate_guide_count = (
+                len(guides)
+                if guides
+                else next(iter(normalized_guide_counts), 0)
+            )
             aggregate.update({
                 'subject_id': subject_id,
                 'query_id': str(aggregate.get('query_id', '') or '').strip(),
                 'annotation_query_ids': query_ids,
-                'annotation_row_count': len(subject_records),
+                'annotation_row_count': sum(
+                    int(record.get('annotation_row_count', 1) or 1)
+                    for record in subject_records
+                ),
                 'guide_targets': ','.join(guides),
-                'guide_count': len(guides),
-                'has_guides': bool(guides),
+                'guide_count': aggregate_guide_count,
+                'has_guides': aggregate_guide_count > 0,
             })
             aggregate.pop('_annotation_row_number', None)
+            aggregate.pop('_normalized_query_ids', None)
             explicit_sgd_id = str(aggregate.get('sgd_id', '') or '')
             subject_sgd_match = re.fullmatch(
                 r'SGDID:(S\d{9})', subject_id
@@ -1181,6 +1274,22 @@ class PathwayAnalysis:
                         gene.get('guide_targets', '')
                     )
                 })
+                normalized_guide_counts = {
+                    int(gene['_normalized_guide_count'])
+                    for gene in matched_members
+                    if gene.get('_normalized_guide_count') is not None
+                }
+                if len(normalized_guide_counts) > 1:
+                    raise ValueError(
+                        "Conflicting normalized guide counts for pathway "
+                        f"gene {pw_kfi_gene_key}: "
+                        f"{sorted(normalized_guide_counts)}"
+                    )
+                guide_count = (
+                    len(guides)
+                    if guides
+                    else next(iter(normalized_guide_counts), 0)
+                )
                 query_ids = sorted({
                     query_id
                     for gene in matched_members
@@ -1226,10 +1335,11 @@ class PathwayAnalysis:
                             'ambiguous_canonical_annotation_identity'
                         )
                     guides = []
+                    guide_count = 0
                 unit.update({
                     'guide_targets': ','.join(guides),
-                    'guide_count': len(guides),
-                    'has_guides': bool(guides),
+                    'guide_count': guide_count,
+                    'has_guides': guide_count > 0,
                     'annotation_query_ids': query_ids,
                     'annotation_subject_ids': annotation_subject_ids,
                     'annotation_unique_ids': annotation_unique_ids,
@@ -1427,6 +1537,68 @@ class PathwayAnalysis:
                     included_in_denominator=index == 0,
                 )
             )
+
+    def _hydrate_normalized_pathway_guides(
+        self, processed_pathways, annotation_data
+    ):
+        """Attach raw guides only for genes retained in pathway results."""
+        source = annotation_data.get('normalized_guide_source')
+        if not source or not processed_pathways:
+            return
+
+        expected_counts = {}
+        for pathway in processed_pathways:
+            for gene in pathway.get('matched_genes', []):
+                unique_id = str(gene.get('unique_id', '') or '').strip()
+                if not unique_id:
+                    if gene.get('guide_count', 0):
+                        raise ValueError(
+                            "Matched normalized pathway gene has guides but "
+                            "no unique_id"
+                        )
+                    continue
+                count = int(gene.get('guide_count', 0) or 0)
+                previous = expected_counts.get(unique_id)
+                if previous is not None and previous != count:
+                    raise ValueError(
+                        f"Conflicting pathway guide counts for {unique_id}"
+                    )
+                expected_counts[unique_id] = count
+
+        raw_guides = {unique_id: [] for unique_id in expected_counts}
+        if expected_counts:
+            for guide in iter_normalized_guides(
+                source['normalized_guides'],
+                source['normalized_gene_guide_manifest'],
+                verify=False,
+            ):
+                unique_id = guide['unique_id']
+                if unique_id in raw_guides:
+                    raw_target = str(
+                        guide.get('raw_guide_target', '') or ''
+                    ).strip()
+                    if not raw_target:
+                        raise ValueError(
+                            f"Normalized guide for {unique_id} has no raw "
+                            "compatibility representation"
+                        )
+                    raw_guides[unique_id].append(raw_target)
+
+        serialized = {}
+        for unique_id, expected_count in expected_counts.items():
+            observed = raw_guides[unique_id]
+            if len(observed) != expected_count:
+                raise ValueError(
+                    f"Normalized guide_count mismatch for {unique_id}: "
+                    f"expected {expected_count}, observed {len(observed)}"
+                )
+            serialized[unique_id] = ','.join(sorted(observed))
+
+        for pathway in processed_pathways:
+            for gene in pathway.get('matched_genes', []):
+                unique_id = str(gene.get('unique_id', '') or '').strip()
+                if unique_id in serialized:
+                    gene['guide_targets'] = serialized[unique_id]
     
     def process_all_pathways(self):
         """Process all pathways"""
@@ -1588,6 +1760,9 @@ class PathwayAnalysis:
                 f"PW-KFI: {pw_kfi_score:.3f} ({targetable_type})"
             )
         
+        self._hydrate_normalized_pathway_guides(
+            processed_pathways, annotation_data
+        )
         return processed_pathways
     
     def save_pathway_results(self, processed_pathways):

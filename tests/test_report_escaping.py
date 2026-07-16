@@ -96,6 +96,14 @@ class ReportEscapingTests(unittest.TestCase):
         marker = f'<script type="application/json" id="{element_id}">'
         return json.loads(document.split(marker, 1)[1].split('</script>', 1)[0])
 
+    @staticmethod
+    def extract_javascript_variable(source, variable_name):
+        marker = f'var {variable_name} = '
+        value, _ = json.JSONDecoder().raw_decode(
+            source[source.index(marker) + len(marker):]
+        )
+        return value
+
     def test_html_script_json_serializer_round_trips_dangerous_text(self):
         serialized = serialize_json_for_html_script({
             'value': DANGEROUS_TEXT,
@@ -132,10 +140,17 @@ class ReportEscapingTests(unittest.TestCase):
             generator = ReportGenerator(config)
             results = self.standard_results(config, final_path)
 
-            interactive_html = generator._generate_html_content(results)
-            payload = self.extract_json_script(
-                interactive_html, 'twheel-data'
+            published = generator.publish_browser_payload(results)
+            interactive_html = generator._generate_html_content(
+                results,
+                payload_script_src=published['core_relative_path'],
             )
+            payload_source = Path(published['core_path']).read_text(
+                encoding='utf-8'
+            )
+            payload = self.extract_javascript_variable(
+                payload_source, 'payload'
+            )['data']
             static_html = generator._generate_static_html_content(results)
 
         self.assertEqual(
@@ -146,7 +161,8 @@ class ReportEscapingTests(unittest.TestCase):
         )
         self.assertNotIn('<img src=x onerror="owned">', interactive_html)
         self.assertNotIn('<img src=x onerror="owned">', static_html)
-        self.assertIn('\\u003c/script\\u003e', interactive_html)
+        self.assertNotIn('twheel-data', interactive_html)
+        self.assertIn('\\u003c/script\\u003e', payload_source)
         self.assertIn('&lt;/script&gt;', static_html)
         self.assertIn('&quot;', static_html)
         self.assertIn('&#x27;', static_html)
@@ -179,6 +195,14 @@ class ReportEscapingTests(unittest.TestCase):
         self.assertIn('escapeHTML(value)', javascript)
         self.assertIn('data-go-download-id=', javascript)
         self.assertIn('${this.escapeHTML(parent.description)}', javascript)
+        self.assertLess(
+            javascript.index(
+                'delete window.__TWHEEL_REPORT_GUIDE_CHUNKS__[registryKey]'
+            ),
+            javascript.index(
+                'if (!Array.isArray(rows) || rows.length !== chunk.row_count)'
+            ),
+        )
         self.assertNotIn(
             'onclick="window.tWheelReport.downloadGOGuideRNAs', javascript
         )
@@ -242,17 +266,33 @@ class ReportEscapingTests(unittest.TestCase):
             )
             common_generator = ReportGenerator(config)
             common_results = self.standard_results(config, final_path)
+            pathway_payload = generator._build_pathway_browser_data(
+                pathways, summary
+            )
+            published = common_generator.publish_browser_payload(
+                common_results,
+                namespace='pathway',
+                extra_globals={
+                    '__TWHEEL_PATHWAY_PAYLOAD__': pathway_payload,
+                },
+            )
             document = generator.create_pathway_html_template(
                 pathways,
                 summary,
                 {},
                 common_results=common_results,
                 common_report_generator=common_generator,
+                payload_script_src=published['core_relative_path'],
             )
-            payload = self.extract_json_script(document, 'pathway-data')
-            common_payload = self.extract_json_script(
-                document, 'twheel-data'
+            payload_source = Path(published['core_path']).read_text(
+                encoding='utf-8'
             )
+            payload = self.extract_javascript_variable(
+                payload_source, 'extraGlobals'
+            )['__TWHEEL_PATHWAY_PAYLOAD__']
+            common_payload = self.extract_javascript_variable(
+                payload_source, 'payload'
+            )['data']
 
         self.assertEqual(payload['pathways'][0]['pathway_id'], DANGEROUS_TEXT)
         self.assertEqual(
@@ -263,7 +303,9 @@ class ReportEscapingTests(unittest.TestCase):
             DANGEROUS_TEXT,
         )
         self.assertNotIn('<img src=x onerror="owned">', document)
-        self.assertIn('\\u003c/script\\u003e', document)
+        self.assertNotIn('pathway-data', document)
+        self.assertNotIn('twheel-data', document)
+        self.assertIn('\\u003c/script\\u003e', payload_source)
         self.assertNotIn('onclick="showPathwayGenes(\'', document)
         self.assertNotIn('onclick="openSgdLink(\'', document)
         self.assertNotIn('function generateSampleSVG', document)

@@ -198,18 +198,49 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         return path
 
     @staticmethod
-    def embedded_pathway_data(report_path):
+    def browser_payloads(report_path):
         content = Path(report_path).read_text(encoding='utf-8')
-        marker = '<script type="application/json" id="pathway-data">'
-        payload = content.split(marker, 1)[1].split('</script>', 1)[0]
-        return json.loads(payload)
+        match = re.search(
+            r'<script src="([^"]*report_payloads/[^"]+/core\.js)"></script>',
+            content,
+        )
+        if match is None:
+            raise AssertionError('Pathway report does not reference a payload')
+        core_path = Path(report_path).parent / match.group(1)
+        source = core_path.read_text(encoding='utf-8')
 
-    @staticmethod
-    def embedded_report_data(report_path):
-        content = Path(report_path).read_text(encoding='utf-8')
-        marker = '<script type="application/json" id="twheel-data">'
-        payload = content.split(marker, 1)[1].split('</script>', 1)[0]
-        return json.loads(payload)
+        def variable(name):
+            marker = f'var {name} = '
+            value, _ = json.JSONDecoder().raw_decode(
+                source[source.index(marker) + len(marker):]
+            )
+            return value
+
+        common_payload = variable('payload')
+        common_data = dict(common_payload['data'])
+        guides = []
+        for chunk in common_payload['guides']['chunks']:
+            chunk_source = (core_path.parent / chunk['src']).read_text(
+                encoding='utf-8'
+            )
+            assignment = chunk_source.index('] = ') + len('] = ')
+            rows, _ = json.JSONDecoder().raw_decode(
+                chunk_source[assignment:]
+            )
+            guides.extend(rows)
+        common_data['guide_rna'] = guides
+        pathway_data = variable('extraGlobals')[
+            '__TWHEEL_PATHWAY_PAYLOAD__'
+        ]
+        return content, common_payload, common_data, pathway_data
+
+    @classmethod
+    def embedded_pathway_data(cls, report_path):
+        return cls.browser_payloads(report_path)[3]
+
+    @classmethod
+    def embedded_report_data(cls, report_path):
+        return cls.browser_payloads(report_path)[2]
 
     def write_common_report_artifacts(self):
         (self.intermediate_dir / 'transcriptome.fa').write_text(
@@ -676,6 +707,25 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             first_embedded['pathway_svgs'],
             first_summary['pathway_svgs'],
         )
+        browser_pointer = first_summary['browser_payload']
+        self.assertEqual(browser_pointer['schema_version'], 2)
+        self.assertEqual(browser_pointer['namespace'], 'pathway')
+        self.assertTrue(
+            (self.output_dir / browser_pointer['manifest']).is_file()
+        )
+        self.assertTrue(
+            (
+                self.output_dir
+                / 'web_data'
+                / 'report_payloads'
+                / '.committed'
+                / (self.output_dir / browser_pointer['manifest']).parent.name
+            ).is_file()
+        )
+        first_html = Path(first_results['html_report_path']).read_text(
+            encoding='utf-8'
+        )
+        self.assertNotIn('type="application/json"', first_html)
         self.assertEqual(
             database_path.read_bytes(), b'pre-existing database sentinel'
         )
@@ -829,6 +879,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             [],
             {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
             {},
+            payload_script_src='web_data/report_payloads/test/core.js',
         )
 
         nav_items = re.findall(
@@ -863,7 +914,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
                     html_content.count(f'<h2>{label}</h2>'), 1
                 )
 
-    def test_html_embeds_each_large_pathway_payload_once(self):
+    def test_html_shell_does_not_embed_large_pathway_payload(self):
         guide_sentinel = 'UNIQUE_GUIDE_PAYLOAD_' + ('G' * 4096)
         svg_sentinel = 'UNIQUE_SVG_PAYLOAD_' + ('S' * 4096)
         matched_genes_sentinel = 'UNUSED_MATCHED_GENES_' + ('M' * 4096)
@@ -897,13 +948,14 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         }
 
         html_content = self.generator.create_pathway_html_template(
-            pathways, summary, pathway_genes
+            pathways,
+            summary,
+            pathway_genes,
+            payload_script_src='web_data/report_payloads/test/core.js',
         )
-        marker = '<script type="application/json" id="pathway-data">'
-        raw_payload = html_content.split(marker, 1)[1].split(
-            '</script>', 1
-        )[0]
-        payload = json.loads(raw_payload)
+        payload = self.generator._build_pathway_browser_data(
+            pathways, summary
+        )
 
         self.assertEqual(set(payload), {
             'summary', 'pathways', 'pathway_guide_data', 'pathway_svgs',
@@ -917,13 +969,13 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         )
         self.assertEqual(payload['pathway_svgs'], summary['pathway_svgs'])
         self.assertNotIn('matched_genes', payload['pathways'][0])
-        self.assertEqual(raw_payload.count(guide_sentinel), 1)
-        self.assertEqual(raw_payload.count(svg_sentinel), 1)
-        self.assertNotIn(matched_genes_sentinel, raw_payload)
-        self.assertNotIn(mapping_sentinel, raw_payload)
-        self.assertEqual(
-            html_content.count('JSON.parse(dataElement.textContent)'), 1
-        )
+        self.assertNotIn(guide_sentinel, html_content)
+        self.assertNotIn(svg_sentinel, html_content)
+        self.assertNotIn(matched_genes_sentinel, html_content)
+        self.assertNotIn(mapping_sentinel, html_content)
+        self.assertNotIn('pathway-data', html_content)
+        self.assertNotIn('twheel-data', html_content)
+        self.assertIn('window.__TWHEEL_PATHWAY_PAYLOAD__', html_content)
         self.assertEqual(
             html_content.count('const data = getPathwayReportData();'), 5
         )
@@ -933,6 +985,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             [],
             {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
             {},
+            payload_script_src='web_data/report_payloads/test/core.js',
         )
 
         assessment_start = html_content.index(
@@ -971,7 +1024,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         self.assertNotIn('<h2>Summary Statistics</h2>', html_content)
         self.assertNotIn('<h2>Pathway Analysis</h2>', html_content)
 
-    def test_common_sections_embed_run_data_and_analysis_configuration(self):
+    def test_common_sections_load_run_data_and_analysis_configuration(self):
         self.write_canonical_artifacts()
         self.write_common_report_artifacts()
 
@@ -1023,8 +1076,8 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             embedded_data['config']['busco'],
             {'lineage': 'fixture_lineage'},
         )
-        self.assertIn('FIXTURE_GENE', html_content)
-        self.assertIn('FIXTURE_GUIDE_NAG', html_content)
+        self.assertNotIn('FIXTURE_GENE', html_content)
+        self.assertNotIn('FIXTURE_GUIDE_NAG', html_content)
         self.assertIn('fixture_genome.fa', html_content)
         self.assertIn('<strong>PAM Pattern:</strong> NAG', html_content)
         self.assertIn('<strong>Max Mismatch:</strong> 3', html_content)
@@ -1100,6 +1153,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             [],
             {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
             {},
+            payload_script_src='web_data/report_payloads/test/core.js',
         )
 
         self.assertIn('guide => guide.gene_key === geneKey', html_content)
@@ -1126,6 +1180,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             [],
             {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
             {},
+            payload_script_src='web_data/report_payloads/test/core.js',
         )
         function_marker = 'function generatePathwayGuidesCSVContent'
         function_start = html_content.index(function_marker)

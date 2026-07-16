@@ -2,11 +2,88 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from src.modules.guide_design import GuideDesign
 
 
 class SiteSpecificTargetTests(unittest.TestCase):
+    def test_run_publishes_normalized_generation_without_per_type_join(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            gene_path = intermediate / 'single_genes.fa'
+            target_path = intermediate / 'single_targets.bed'
+            specific_path = intermediate / 'single_specific.bed'
+            annotation_path = intermediate / 'annotation_classified.txt'
+            annotation_path.write_text('header\n', encoding='utf-8')
+            published = {
+                'normalized_genes': str(intermediate / 'generation/genes.tsv'),
+                'normalized_guides': str(intermediate / 'generation/guides.tsv'),
+                'normalized_gene_guide_manifest': str(
+                    intermediate / 'generation/manifest.json'
+                ),
+                'annotation_with_guides_final': str(
+                    intermediate / 'generation/legacy.tsv'
+                ),
+                'normalized_gene_guide_current': str(
+                    intermediate / 'current.json'
+                ),
+                'generation_dir': str(intermediate / 'generation'),
+            }
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+            })
+            guide_design.prepare_genome_assembly = mock.Mock(
+                return_value=str(intermediate / 'reference.fa')
+            )
+            guide_design.prepare_gene_sequences = mock.Mock(
+                return_value={'single_genes': str(gene_path)}
+            )
+            guide_design.run_crisflash = mock.Mock(
+                return_value=str(target_path)
+            )
+            guide_design.filter_site_specific_targets = mock.Mock(
+                return_value=str(specific_path)
+            )
+            guide_design.merge_with_annotation = mock.Mock(
+                side_effect=AssertionError('legacy per-type join was called')
+            )
+            guide_design.create_final_combined_table = mock.Mock(
+                side_effect=AssertionError('legacy combined copy was called')
+            )
+
+            with mock.patch(
+                'src.modules.guide_design.'
+                'publish_normalized_gene_guide_generation',
+                return_value=published,
+            ) as publish_mock:
+                results = guide_design.run()
+
+            publish_mock.assert_called_once_with(
+                annotation_path=str(annotation_path),
+                output_dir=temp_dir,
+                multi_bed_path=None,
+                single_bed_path=str(specific_path),
+            )
+            guide_design.merge_with_annotation.assert_not_called()
+            guide_design.create_final_combined_table.assert_not_called()
+            self.assertEqual(
+                results['normalized_genes'], published['normalized_genes']
+            )
+            self.assertEqual(
+                results['normalized_guides'], published['normalized_guides']
+            )
+            self.assertEqual(
+                results['final_table'],
+                published['annotation_with_guides_final'],
+            )
+            self.assertEqual(
+                results['target_results']['single_genes'][
+                    'annotation_with_guides'
+                ],
+                published['annotation_with_guides_final'],
+            )
+
     def test_empty_alignment_directory_rejects_expected_multi_genes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intermediate = Path(temp_dir)
