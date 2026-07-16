@@ -3251,6 +3251,17 @@ class PathwayReportGenerator:
             link.click();
             document.body.removeChild(link);
         }}
+
+        function escapeCSVField(value) {{
+            if (value === null || value === undefined) return '';
+            const normalized = String(value).replace(/\\r\\n|\\r|\\n/g, ' ');
+            if (!/[",]/.test(normalized)) return normalized;
+            return '"' + normalized.replace(/"/g, '""') + '"';
+        }}
+
+        function serializeCSVRow(values) {{
+            return values.map(escapeCSVField).join(',');
+        }}
         
         function generateCSVContent() {{
             const headers = [
@@ -3261,7 +3272,7 @@ class PathwayReportGenerator:
             ];
             const rows = filteredData.map(pathway => [
                 pathway.pathway_id,
-                `"${{pathway.pathway_name}}"`,
+                pathway.pathway_name,
                 pathway.total_gene_nodes,
                 pathway.evaluable_gene_nodes,
                 pathway.unique_xref_count,
@@ -3272,7 +3283,10 @@ class PathwayReportGenerator:
                 (pathway.coverage_rate * 100).toFixed(2) + '%'
             ]);
             
-            return [headers.join(','), ...rows.map(row => row.join(','))].join('\\n');
+            return [
+                headers.join(','),
+                ...rows.map(row => serializeCSVRow(row))
+            ].join('\\n');
         }}
         
         function downloadPathwayGuides(pathwayId) {{
@@ -3347,13 +3361,13 @@ class PathwayReportGenerator:
             // データ行を生成
             const rows = pathwayGuideData.guides.map(guide => [
                 guide.pathway_id || '',
-                `"${{(guide.pathway_name || '').replace(/"/g, '""')}}"`, // CSVエスケープ
+                guide.pathway_name || '',
                 guide.pathway_gene_database || '',
                 guide.pathway_gene_id || '',
                 guide.gene_key || '',
                 guide.pw_kfi_gene_key || '',
-                `"${{(guide.source_xref_keys || []).join(';').replace(/"/g, '""')}}"`,
-                `"${{(guide.source_databases || []).join(';').replace(/"/g, '""')}}"`,
+                (guide.source_xref_keys || []).join(';'),
+                (guide.source_databases || []).join(';'),
                 guide.annotation_source_database || '',
                 guide.matched_annotation_key || '',
                 guide.matched_annotation_id || '',
@@ -3361,9 +3375,9 @@ class PathwayReportGenerator:
                 guide.match_method || '',
                 guide.sgd_id || '',
                 guide.ensembl_id || '',
-                `"${{(guide.gene_name || '').replace(/"/g, '""')}}"`, // CSVエスケープ
+                guide.gene_name || '',
                 guide.unique_id || '',
-                `"${{(guide.description || '').replace(/"/g, '""')}}"`, // CSVエスケープ
+                guide.description || '',
                 guide.guide_unique_id || '',
                 guide.start_pos || '',
                 guide.end_pos || '',
@@ -3375,7 +3389,10 @@ class PathwayReportGenerator:
             ]);
             
             // CSV形式に変換
-            return [headers.join(','), ...rows.map(row => row.join(','))].join('\\n');
+            return [
+                headers.join(','),
+                ...rows.map(row => serializeCSVRow(row))
+            ].join('\\n');
         }}
     </script>
 </body>

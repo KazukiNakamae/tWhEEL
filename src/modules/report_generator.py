@@ -4567,11 +4567,14 @@ class tWhEELReport {
     
     // CSV field escape helper (RFC 4180 compliant)
     escapeCSVField(value) {
-        if (value === null || value === undefined) return '""';
-        const str = String(value);
-        // Escape embedded double quotes as "" and normalize line breaks to spaces
-        const escaped = str.replace(/"/g, '""').replace(/\\n/g, ' ').replace(/\\r/g, ' ');
-        return '"' + escaped + '"';
+        if (value === null || value === undefined) return '';
+        const normalized = String(value).replace(/\\r\\n|\\r|\\n/g, ' ');
+        if (!/[",]/.test(normalized)) return normalized;
+        return '"' + normalized.replace(/"/g, '""') + '"';
+    }
+
+    serializeCSVRow(values) {
+        return values.map(value => this.escapeCSVField(value)).join(',');
     }
 
     // Guide RNA CSV download functionality
@@ -4664,7 +4667,7 @@ class tWhEELReport {
         // Create CSV rows
         const rows = guides.map(guide => [
             goId,
-            `"${goName}"`, // Quote to handle commas in GO names
+            goName,
             guide.matched_gene,
             guide.query_id,
             guide.reference,
@@ -4678,7 +4681,9 @@ class tWhEELReport {
         ]);
         
         // Combine header and rows
-        const csvLines = [headers.join(',')].concat(rows.map(row => row.join(',')));
+        const csvLines = [headers.join(',')].concat(
+            rows.map(row => this.serializeCSVRow(row))
+        );
         
         return csvLines.join('\\n');
     }
@@ -4726,20 +4731,21 @@ class tWhEELReport {
                 'Number_of_Targets'
             ];
             
-            // Create CSV rows
-            // Use escapeCSVField to properly handle commas, double quotes, and newlines in text fields
+            // Serialize every field so identifiers and descriptions are escaped consistently.
             const rows = this.filteredGeneData.map(gene => [
                 gene.query_id,
                 gene.subject_id,
-                this.escapeCSVField(gene.gene_name),
-                this.escapeCSVField(gene.description),
+                gene.gene_name,
+                gene.description,
                 gene.classification,
                 gene.unique_id,
                 gene.target_count
             ]);
             
             // Combine header and rows
-            const csvLines = [headers.join(',')].concat(rows.map(row => row.join(',')));
+            const csvLines = [headers.join(',')].concat(
+                rows.map(row => this.serializeCSVRow(row))
+            );
             const csvContent = csvLines.join('\\n');
             
             // Download CSV file
@@ -4795,7 +4801,9 @@ class tWhEELReport {
             ]);
             
             // Combine header and rows
-            const csvLines = [headers.join(',')].concat(rows.map(row => row.join(',')));
+            const csvLines = [headers.join(',')].concat(
+                rows.map(row => this.serializeCSVRow(row))
+            );
             const csvContent = csvLines.join('\\n');
             
             // Download CSV file
@@ -4840,8 +4848,8 @@ class tWhEELReport {
                 // Base fields (7 columns before gene groups)
                 const baseFields = [
                     go.go_id,
-                    this.escapeCSVField(go.go_name),
-                    this.escapeCSVField(go.go_definition),
+                    go.go_name,
+                    go.go_definition,
                     go.total_genes,
                     go.genes_with_guides,
                     go.kfi_score.toFixed(4),
@@ -4855,12 +4863,14 @@ class tWhEELReport {
                     ? genesValue.split(', ').map(g => g.trim()).filter(g => g.length > 0)
                     : [];
                 
-                // Each gene group ID goes in its own cell (no quoting needed, IDs contain no special chars)
+                // Each gene group ID goes in its own cell.
                 return [...baseFields, ...geneGroups];
             });
             
             // Combine header and rows (rows have variable column counts)
-            const csvLines = [headers.join(',')].concat(rows.map(row => row.join(',')));
+            const csvLines = [headers.join(',')].concat(
+                rows.map(row => this.serializeCSVRow(row))
+            );
             const csvContent = csvLines.join('\\n');
             
             // Download CSV file
@@ -4895,12 +4905,14 @@ class tWhEELReport {
             // Create CSV rows
             const rows = this.data.go_parent_counts.map(parent => [
                 parent.parent_go,
-                `"${parent.description}"`, // Quote to handle commas
+                parent.description,
                 parent.count
             ]);
             
             // Combine header and rows
-            const csvLines = [headers.join(',')].concat(rows.map(row => row.join(',')));
+            const csvLines = [headers.join(',')].concat(
+                rows.map(row => this.serializeCSVRow(row))
+            );
             const csvContent = csvLines.join('\\n');
             
             // Download CSV file

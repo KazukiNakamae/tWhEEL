@@ -1,5 +1,9 @@
+import csv
+import io
 import json
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -208,6 +212,97 @@ class ReportEscapingTests(unittest.TestCase):
         )
         self.assertIn('encodeURIComponent(go.go_id)', javascript)
         self.assertIn("document.createTextNode(` ${String(message ?? '')}`)", javascript)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is not available.')
+    def test_standard_csv_downloads_escape_quotes_and_commas(self):
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            generator = ReportGenerator(self.config(root, 'safe'))
+            generator._create_js_files()
+            javascript = (
+                Path(generator.output_dir) / 'static' / 'js' / 'main.js'
+            ).read_text(encoding='utf-8')
+
+        helper_start = javascript.index('    escapeCSVField(value) {')
+        helper_end = javascript.index(
+            '    // Guide RNA CSV download functionality', helper_start
+        )
+        guide_start = javascript.index(
+            '    generateGOGuideRNACSV(guides, goId, goName) {'
+        )
+        guide_end = javascript.index(
+            '    downloadCSV(csvContent, filename) {', guide_start
+        )
+        parent_start = javascript.index(
+            '    downloadGOParentTermsCSV() {'
+        )
+        parent_end = javascript.index(
+            '    // Copy to clipboard functionality', parent_start
+        )
+
+        go_name = 'Alpha "quoted", term'
+        query_id = 'query "quoted", 1'
+        description = 'regulation of "alpha, beta" process'
+        guide = {
+            'matched_gene': 'Single_0000000001',
+            'query_id': query_id,
+            'reference': 'Single_0000000001',
+            'start': 1,
+            'end': 23,
+            'target_sequence': 'ACGT',
+            'strand': '+',
+            'mm0': 0,
+            'mm1_2': 0,
+            'off_target_score': 100,
+        }
+        node_source = (
+            'const outputs = [];\n'
+            'class CSVExporter {\n'
+            + javascript[helper_start:helper_end]
+            + javascript[guide_start:guide_end]
+            + javascript[parent_start:parent_end]
+            + '    downloadCSV(content) { outputs.push(content); }\n'
+            + '    showSuccess() {}\n'
+            + '    showError(message) { throw new Error(message); }\n'
+            + '}\n'
+            + 'console.log = () => {};\n'
+            + 'const exporter = new CSVExporter();\n'
+            + 'outputs.push(exporter.generateGOGuideRNACSV('
+            + json.dumps([guide])
+            + ", 'GO:0000001', "
+            + json.dumps(go_name)
+            + '));\n'
+            + 'exporter.data = {go_parent_counts: ['
+            + json.dumps({
+                'parent_go': 'GO:0000002',
+                'description': description,
+                'count': 1,
+            })
+            + ']};\n'
+            + 'exporter.downloadGOParentTermsCSV();\n'
+            + 'process.stdout.write(JSON.stringify(outputs));\n'
+        )
+        result = subprocess.run(
+            [shutil.which('node'), '-e', node_source],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        guide_csv, parent_csv = json.loads(result.stdout)
+        guide_rows = list(csv.reader(
+            io.StringIO(guide_csv, newline=''), strict=True
+        ))
+        parent_rows = list(csv.reader(
+            io.StringIO(parent_csv, newline=''), strict=True
+        ))
+
+        self.assertEqual(len(guide_rows[0]), 12)
+        self.assertEqual(len(guide_rows[1]), 12)
+        self.assertEqual(guide_rows[1][1], go_name)
+        self.assertEqual(guide_rows[1][3], query_id)
+        self.assertEqual(len(parent_rows[0]), 3)
+        self.assertEqual(len(parent_rows[1]), 3)
+        self.assertEqual(parent_rows[1][1], description)
 
     def test_pathway_json_and_dynamic_rendering_contract_are_safe(self):
         with tempfile.TemporaryDirectory() as temp_dir_name:

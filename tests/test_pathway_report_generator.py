@@ -1175,6 +1175,53 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         self.assertNotIn('PW-KFI node coverage', html_content)
 
     @unittest.skipUnless(shutil.which('node'), 'Node.js is not available.')
+    def test_pathway_csv_escapes_quotes_and_commas(self):
+        html_content = self.generator.create_pathway_html_template(
+            [],
+            {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
+            {},
+            payload_script_src='web_data/report_payloads/test/core.js',
+        )
+        helper_start = html_content.index('function escapeCSVField(value)')
+        function_start = html_content.index('function generateCSVContent()')
+        function_end = html_content.index(
+            'function downloadPathwayGuides', function_start
+        )
+        pathway_name = 'Alpha "quoted", pathway'
+        filtered_data = [{
+            'pathway_id': 'WP1',
+            'pathway_name': pathway_name,
+            'total_gene_nodes': 2,
+            'evaluable_gene_nodes': 1,
+            'unique_xref_count': 1,
+            'total_genes': 1,
+            'genes_with_guides': 1,
+            'pw_kfi_score': 1,
+            'targetable_type': 'Fully targetable',
+            'coverage_rate': 1,
+        }]
+        javascript = (
+            'const filteredData = '
+            + json.dumps(filtered_data)
+            + ';\n'
+            + html_content[helper_start:function_start]
+            + html_content[function_start:function_end]
+            + '\nprocess.stdout.write(generateCSVContent());'
+        )
+
+        result = subprocess.run(
+            [shutil.which('node'), '-e', javascript],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rows = list(csv.reader(result.stdout.splitlines(), strict=True))
+
+        self.assertEqual(len(rows[0]), 10)
+        self.assertEqual(len(rows[1]), 10)
+        self.assertEqual(rows[1][1], pathway_name)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node.js is not available.')
     def test_guide_csv_exports_mm0_and_mm1_2_values(self):
         html_content = self.generator.create_pathway_html_template(
             [],
@@ -1188,15 +1235,21 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             '\n        }\n    </script>', function_start
         ) + len('\n        }')
         function_source = html_content[function_start:function_end]
+        helper_start = html_content.index('function escapeCSVField(value)')
+        helper_end = html_content.index(
+            'function generateCSVContent()', helper_start
+        )
         guide_data = {
             'guides': [{
                 'pathway_id': 'WP1',
+                'description': 'Alpha "quoted", description',
                 'MM0': '1',
                 'MM1-2': '0',
             }]
         }
         javascript = (
-            function_source
+            html_content[helper_start:helper_end]
+            + function_source
             + '\nprocess.stdout.write('
             + 'generatePathwayGuidesCSVContent('
             + json.dumps(guide_data)
@@ -1209,12 +1262,16 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        rows = list(csv.reader(result.stdout.splitlines()))
+        rows = list(csv.reader(result.stdout.splitlines(), strict=True))
         mm0_index = rows[0].index('MM0')
         mm1_2_index = rows[0].index('MM1-2')
 
         self.assertEqual(rows[1][mm0_index], '1')
         self.assertEqual(rows[1][mm1_2_index], '0')
+        self.assertEqual(
+            rows[1][rows[0].index('Description')],
+            'Alpha "quoted", description',
+        )
 
 
 if __name__ == '__main__':
