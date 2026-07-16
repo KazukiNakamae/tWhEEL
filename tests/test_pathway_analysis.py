@@ -676,7 +676,10 @@ class PathwayAnalysisIdentifierTests(unittest.TestCase):
 
         report_results = PathwayReportGenerator(self.config).run()
 
-        self.assertTrue(Path(report_results['database_path']).is_file())
+        self.assertNotIn('database_path', report_results)
+        self.assertTrue(
+            Path(report_results['report_sources_manifest']).is_file()
+        )
         self.assertTrue(Path(report_results['summary_json_path']).is_file())
         self.assertTrue(Path(report_results['html_report_path']).is_file())
         self.assertEqual(report_results['statistics']['total_pathways'], 0)

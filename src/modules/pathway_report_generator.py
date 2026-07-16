@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 Pathway Report Generation Module
-HTML report generation and database integration of PW-KFI analysis results
+HTML report generation and source staging for PW-KFI analysis results
 """
 
 import os
 import json
 import logging
-import sqlite3
 import csv
 import ast
+import hashlib
 import shutil
 import html
 import re
@@ -20,6 +20,8 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from .report_source_store import ReportSourceStore
+
 
 try:
     csv.field_size_limit(sys.maxsize)
@@ -29,6 +31,11 @@ except OverflowError:
 
 class PathwayReportGenerator:
     """Pathway report generation processing class"""
+
+    REPORT_SOURCE_FILES = {
+        'pathway_kfi_table': 'pathway_kfi_table.csv',
+        'pathway_gene_mapping': 'pathway_gene_mapping.tsv',
+    }
     
     def __init__(self, config):
         """
@@ -43,15 +50,102 @@ class PathwayReportGenerator:
         self.output_dir = self.config['output']['base_dir']
         self.web_data_dir = os.path.join(self.output_dir, 'web_data')
         self.pathway_report_config = self.config.get('pathway_report', {})
+        self.report_source_store = ReportSourceStore(self.web_data_dir)
         
         # 出力ディレクトリを作成
         Path(self.web_data_dir).mkdir(parents=True, exist_ok=True)
-    
+
     def load_pathway_analysis_results(self):
-        """Load and validate canonical-gene pathway analysis artifacts."""
-        kfi_table_path = os.path.join(self.intermediate_dir, 'pathway_kfi_table.csv')
-        if not os.path.exists(kfi_table_path):
-            raise FileNotFoundError(f"PW-KFI table not found.: {kfi_table_path}")
+        """Load current artifacts or a complete verified pathway snapshot."""
+        intermediate_dir = Path(self.intermediate_dir)
+        current_paths = {
+            key: intermediate_dir / filename
+            for key, filename in self.REPORT_SOURCE_FILES.items()
+        }
+
+        if intermediate_dir.exists():
+            if not intermediate_dir.is_dir():
+                raise NotADirectoryError(
+                    f"Intermediate path is not a directory: {intermediate_dir}"
+                )
+            current_present = {
+                key: path.is_file() for key, path in current_paths.items()
+            }
+            if not all(current_present.values()):
+                missing = sorted(
+                    key for key, present in current_present.items()
+                    if not present
+                )
+                prefix = (
+                    "Incomplete pathway report source snapshot in intermediate"
+                    if any(current_present.values())
+                    else "Pathway report sources are absent from intermediate"
+                )
+                raise FileNotFoundError(prefix + ': ' + ', '.join(missing))
+
+            pathways, pathway_genes = self._load_pathway_analysis_results(
+                current_paths['pathway_kfi_table'],
+                current_paths['pathway_gene_mapping'],
+            )
+            sources = {
+                key: (path, f'pathway/{self.REPORT_SOURCE_FILES[key]}')
+                for key, path in current_paths.items()
+            }
+            for pathway in pathways:
+                pathway_id = str(
+                    pathway.get('pathway_id', '') or ''
+                ).strip()
+                source_path = Path(
+                    str(pathway.get('gpml_file_path', '') or '')
+                )
+                if source_path.is_file():
+                    logical_key, relative_path = self._gpml_source_entry(
+                        pathway_id
+                    )
+                    sources[logical_key] = (source_path, relative_path)
+
+            published = self.report_source_store.publish_namespace(
+                'pathway', sources
+            )
+            self._connect_pathway_gpml(pathways, published)
+            return pathways, pathway_genes
+
+        snapshot = self.report_source_store.load_namespace('pathway')
+        missing = sorted(set(self.REPORT_SOURCE_FILES) - set(snapshot))
+        if missing:
+            raise FileNotFoundError(
+                "Pathway report source snapshot is incomplete: "
+                + ', '.join(missing)
+            )
+        pathways, pathway_genes = self._load_pathway_analysis_results(
+            snapshot['pathway_kfi_table'],
+            snapshot['pathway_gene_mapping'],
+        )
+        self._connect_pathway_gpml(pathways, snapshot)
+        return pathways, pathway_genes
+
+    @staticmethod
+    def _gpml_source_entry(pathway_id):
+        """Return a collision-resistant logical key and GPML destination."""
+        safe_id = re.sub(
+            r'[^A-Za-z0-9_.-]+', '_', pathway_id
+        ).strip('._') or 'pathway'
+        digest = hashlib.sha256(pathway_id.encode('utf-8')).hexdigest()[:12]
+        return (
+            f'gpml.{pathway_id}',
+            f'pathway/gpml/{safe_id}-{digest}.gpml',
+        )
+
+    @classmethod
+    def _connect_pathway_gpml(cls, pathways, source_paths):
+        """Point pathway rows only at GPML files from the selected snapshot."""
+        for pathway in pathways:
+            pathway_id = str(pathway.get('pathway_id', '') or '').strip()
+            logical_key, _ = cls._gpml_source_entry(pathway_id)
+            pathway['gpml_file_path'] = source_paths.get(logical_key, '')
+
+    def _load_pathway_analysis_results(self, kfi_table_path, mapping_path):
+        """Read and validate one canonical pathway table pair."""
 
         required_pathway_columns = {
             'pathway_id', 'pathway_name', 'total_gene_nodes',
@@ -283,7 +377,6 @@ class PathwayReportGenerator:
                     )
                 pathways.append(row)
 
-        mapping_path = os.path.join(self.intermediate_dir, 'pathway_gene_mapping.tsv')
         pathway_genes = {}
         if not os.path.exists(mapping_path):
             raise FileNotFoundError(
@@ -354,511 +447,7 @@ class PathwayReportGenerator:
         self.logger.info(f"Pathway data loading complete.: {len(pathways)} Pathway, {len(pathway_genes)} associated genes")
         return pathways, pathway_genes
 
-    def load_pathway_gene_match_audit(self):
-        """Load exact-match and non-evaluable pathway gene audit records."""
-        audit_path = os.path.join(
-            self.intermediate_dir, 'pathway_gene_match_audit.tsv'
-        )
-        if not os.path.exists(audit_path):
-            self.logger.warning(
-                f"Pathway gene match audit not found; legacy report data only: "
-                f"{audit_path}"
-            )
-            return []
-
-        required_columns = {
-            'pathway_id', 'pathway_gene_database', 'pathway_gene_id',
-            'pw_kfi_gene_key', 'node_occurrence_count',
-            'denominator_contribution', 'included_in_denominator',
-            'status', 'reason', 'canonicalization_complete',
-            'pathway_canonicalization_status',
-        }
-        with open(audit_path, 'r', encoding='utf-8', newline='') as handle:
-            reader = csv.DictReader(handle, delimiter='\t')
-            missing_columns = required_columns - set(reader.fieldnames or [])
-            if missing_columns:
-                raise ValueError(
-                    "Pathway gene match audit is missing required columns: "
-                    + ', '.join(sorted(missing_columns))
-                )
-            return list(reader)
     
-    def load_annotation_and_guide_data(self):
-        """Load legacy annotation data with deterministic conflict handling."""
-        annotation_file = os.path.join(self.intermediate_dir, 'annotation_classified.txt')
-        
-        if not os.path.exists(annotation_file):
-            raise FileNotFoundError(f"Annotation result file not found.: {annotation_file}")
-        
-        records_by_sgd = {}
-        sgd_ids_by_unique_id = {}
-        
-        with open(annotation_file, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f, delimiter='\t')
-            for row in reader:
-                sgd_id = str(row.get('subject_id', '') or '').strip()
-                unique_id = str(row.get('unique_id', '') or '').strip()
-                clean_sgd_id = (
-                    sgd_id[len('SGDID:'):] if sgd_id.startswith('SGDID:')
-                    else sgd_id
-                )
-                if not clean_sgd_id:
-                    continue
-                records_by_sgd.setdefault(clean_sgd_id, []).append(row)
-                if unique_id:
-                    sgd_ids_by_unique_id.setdefault(unique_id, set()).add(
-                        clean_sgd_id
-                    )
-
-        annotation_data = {}
-        guide_data = {}
-        for clean_sgd_id in sorted(records_by_sgd):
-            records = records_by_sgd[clean_sgd_id]
-            identities = sorted({
-                str(record.get('unique_id', '') or '').strip()
-                for record in records
-                if str(record.get('unique_id', '') or '').strip()
-            })
-            if len(identities) > 1:
-                raise ValueError(
-                    "Ambiguous legacy annotation subject mapping: "
-                    f"{clean_sgd_id} -> {identities}"
-                )
-            representative = min(
-                records,
-                key=lambda record: tuple(
-                    (key, str(record.get(key, '') or ''))
-                    for key in sorted(record)
-                ),
-            ).copy()
-            annotation_data[clean_sgd_id] = representative
-
-            guide_entries = sorted({
-                entry.strip()
-                for record in records
-                for entry in str(
-                    record.get('guide_targets', '') or ''
-                ).split(',')
-                if entry.strip()
-            })
-            guides = []
-            for guide_entry in guide_entries:
-                parts = guide_entry.split('/')
-                if len(parts) >= 6:
-                    guides.append({
-                        'unique_id': parts[0],
-                        'start': parts[1],
-                        'end': parts[2],
-                        'sequence': parts[3],
-                        'MM0': parts[4],
-                        'MM1-2': parts[5],
-                        'off_target_match_score': (
-                            parts[6] if len(parts) > 6 else ''
-                        ),
-                        'strand': parts[7] if len(parts) > 7 else '',
-                    })
-            guide_data[clean_sgd_id] = guides
-
-        unique_id_to_sgd = {}
-        for unique_id in sorted(sgd_ids_by_unique_id):
-            sgd_ids = sorted(sgd_ids_by_unique_id[unique_id])
-            if len(sgd_ids) != 1:
-                raise ValueError(
-                    "Ambiguous legacy unique_id mapping: "
-                    f"{unique_id} -> {sgd_ids}"
-                )
-            unique_id_to_sgd[unique_id] = sgd_ids[0]
-        
-        self.logger.info(f"Annotation guide data loading complete.: {len(annotation_data)} Gene, {len(unique_id_to_sgd)} unique_id Mapping")
-        return annotation_data, guide_data, unique_id_to_sgd
-    
-    def create_pathway_database_tables(self):
-        """Create a pathway table in the SQLite database."""
-        db_path = os.path.join(self.web_data_dir, 'twheel_data.db')
-        
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            
-            # パスウェイ情報テーブル作成
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS pathway_info (
-                    id INTEGER PRIMARY KEY,
-                    pathway_id TEXT UNIQUE,
-                    pathway_name TEXT,
-                    pathway_description TEXT,
-                    pathway_organism TEXT,
-                    total_gene_nodes INTEGER,
-                    evaluable_gene_nodes INTEGER,
-                    unique_xref_count INTEGER,
-                    total_genes INTEGER,
-                    gene_count_basis TEXT,
-                    matched_genes INTEGER,
-                    genes_with_guides INTEGER,
-                    pw_kfi_score REAL,
-                    targetable_type TEXT,
-                    coverage_rate REAL,
-                    canonicalization_status TEXT,
-                    gpml_file_path TEXT
-                )
-            ''')
-            
-            # パスウェイ-遺伝子関係テーブル作成
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS pathway_gene_relations (
-                    id INTEGER PRIMARY KEY,
-                    pathway_id TEXT,
-                    pathway_gene_database TEXT,
-                    pathway_gene_id TEXT,
-                    gene_key TEXT,
-                    pw_kfi_gene_key TEXT,
-                    pathway_xrefs TEXT,
-                    source_databases TEXT,
-                    node_occurrence_count INTEGER,
-                    unique_xref_count INTEGER,
-                    canonical_subject_id TEXT,
-                    canonicalization_methods TEXT,
-                    canonicalization_complete BOOLEAN,
-                    annotation_source_database TEXT,
-                    matched_annotation_key TEXT,
-                    matched_annotation_id TEXT,
-                    resolved_annotation_subject_id TEXT,
-                    match_method TEXT,
-                    mapping_source TEXT,
-                    sgd_id TEXT,
-                    ensembl_id TEXT,
-                    unique_id TEXT,
-                    gene_sgd_id TEXT,
-                    gene_name TEXT,
-                    has_guides BOOLEAN,
-                    guide_count INTEGER,
-                    FOREIGN KEY (pathway_id) REFERENCES pathway_info (pathway_id)
-                )
-            ''')
-
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS pathway_gene_match_audit (
-                    id INTEGER PRIMARY KEY,
-                    pathway_id TEXT,
-                    pathway_name TEXT,
-                    gpml_file_path TEXT,
-                    pathway_gene_database TEXT,
-                    pathway_gene_id TEXT,
-                    pathway_gene_name TEXT,
-                    gene_key TEXT,
-                    pw_kfi_gene_key TEXT,
-                    annotation_key TEXT,
-                    node_occurrence_count INTEGER,
-                    denominator_contribution INTEGER,
-                    included_in_denominator BOOLEAN,
-                    status TEXT,
-                    reason TEXT,
-                    canonical_subject_id TEXT,
-                    canonicalization_methods TEXT,
-                    canonicalization_complete BOOLEAN,
-                    pathway_canonicalization_status TEXT,
-                    match_method TEXT,
-                    mapping_source TEXT,
-                    annotation_source_database TEXT,
-                    matched_annotation_key TEXT,
-                    matched_annotation_id TEXT,
-                    resolved_annotation_subject_id TEXT,
-                    sgd_id TEXT,
-                    ensembl_id TEXT,
-                    unique_id TEXT
-                )
-            ''')
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_pathway_gene_match_audit_pathway
-                ON pathway_gene_match_audit (pathway_id)
-            ''')
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_pathway_gene_match_audit_status
-                ON pathway_gene_match_audit (status, reason)
-            ''')
-
-            # Migrate an existing report database without discarding user data.
-            required_relation_columns = {
-                'pathway_gene_database': 'TEXT',
-                'pathway_gene_id': 'TEXT',
-                'gene_key': 'TEXT',
-                'pw_kfi_gene_key': 'TEXT',
-                'pathway_xrefs': 'TEXT',
-                'source_databases': 'TEXT',
-                'node_occurrence_count': 'INTEGER',
-                'unique_xref_count': 'INTEGER',
-                'canonical_subject_id': 'TEXT',
-                'canonicalization_methods': 'TEXT',
-                'canonicalization_complete': 'BOOLEAN',
-                'annotation_source_database': 'TEXT',
-                'matched_annotation_key': 'TEXT',
-                'matched_annotation_id': 'TEXT',
-                'resolved_annotation_subject_id': 'TEXT',
-                'match_method': 'TEXT',
-                'mapping_source': 'TEXT',
-                'sgd_id': 'TEXT',
-                'ensembl_id': 'TEXT',
-                'unique_id': 'TEXT',
-            }
-            required_info_columns = {
-                'total_gene_nodes': 'INTEGER',
-                'evaluable_gene_nodes': 'INTEGER',
-                'unique_xref_count': 'INTEGER',
-                'gene_count_basis': 'TEXT',
-                'canonicalization_status': 'TEXT',
-            }
-            required_audit_columns = {
-                'pw_kfi_gene_key': 'TEXT',
-                'node_occurrence_count': 'INTEGER',
-                'denominator_contribution': 'INTEGER',
-                'canonical_subject_id': 'TEXT',
-                'canonicalization_methods': 'TEXT',
-                'canonicalization_complete': 'BOOLEAN',
-                'pathway_canonicalization_status': 'TEXT',
-            }
-            for table_name, required_columns in (
-                ('pathway_info', required_info_columns),
-                ('pathway_gene_relations', required_relation_columns),
-                ('pathway_gene_match_audit', required_audit_columns),
-            ):
-                existing_columns = {
-                    row[1]
-                    for row in cursor.execute(
-                        f'PRAGMA table_info({table_name})'
-                    ).fetchall()
-                }
-                for column_name, column_type in required_columns.items():
-                    if column_name not in existing_columns:
-                        cursor.execute(
-                            f'ALTER TABLE {table_name} '
-                            f'ADD COLUMN {column_name} {column_type}'
-                        )
-            
-            conn.commit()
-        
-        self.logger.info(f"Pathway database table creation complete.: {db_path}")
-        return db_path
-    
-    def populate_pathway_database(
-        self, pathways, pathway_genes, db_path, pathway_gene_audit=None
-    ):
-        """Insert pathway data into the database."""
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            
-            # 既存のパスウェイデータをクリア
-            cursor.execute('DELETE FROM pathway_gene_relations')
-            cursor.execute('DELETE FROM pathway_gene_match_audit')
-            cursor.execute('DELETE FROM pathway_info')
-            
-            # パスウェイ情報を挿入
-            matched_counts_by_pathway = {}
-            for pathway in pathways:
-                matched_gene_count_value = pathway.get('matched_gene_count', '')
-                if str(matched_gene_count_value).strip():
-                    try:
-                        matched_gene_count = int(matched_gene_count_value)
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"Invalid matched_gene_count for pathway "
-                            f"{pathway.get('pathway_id', '')}: "
-                            f"{matched_gene_count_value!r}"
-                        ) from exc
-                else:
-                    if 'matched_genes' not in pathway:
-                        raise ValueError(
-                            f"Missing matched gene count and list for pathway "
-                            f"{pathway.get('pathway_id', '')}"
-                        )
-                    try:
-                        parsed_matched_genes = self._parse_matched_genes(
-                            pathway['matched_genes']
-                        )
-                    except (
-                        TypeError, ValueError, SyntaxError, json.JSONDecodeError
-                    ) as exc:
-                        raise ValueError(
-                            f"Cannot parse matched genes for pathway "
-                            f"{pathway.get('pathway_id', '')}"
-                        ) from exc
-                    if not isinstance(parsed_matched_genes, list):
-                        raise ValueError(
-                            f"Matched genes must be a list for pathway "
-                            f"{pathway.get('pathway_id', '')}"
-                        )
-                    matched_gene_count = len(parsed_matched_genes)
-
-                if matched_gene_count < 0:
-                    raise ValueError(
-                        f"Negative matched_gene_count for pathway "
-                        f"{pathway.get('pathway_id', '')}"
-                    )
-                matched_counts_by_pathway[pathway['pathway_id']] = (
-                    matched_gene_count
-                )
-                
-                cursor.execute('''
-                    INSERT INTO pathway_info (
-                        pathway_id, pathway_name, pathway_description, pathway_organism,
-                        total_gene_nodes, evaluable_gene_nodes, unique_xref_count,
-                        total_genes, gene_count_basis, matched_genes,
-                        genes_with_guides, pw_kfi_score,
-                        targetable_type, coverage_rate, canonicalization_status,
-                        gpml_file_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    pathway['pathway_id'],
-                    pathway['pathway_name'],
-                    '',  # pathway_description は後で追加可能
-                    pathway.get('pathway_organism', ''),
-                    int(pathway.get('total_gene_nodes', 0) or 0),
-                    int(pathway.get('evaluable_gene_node_count', 0) or 0),
-                    int(pathway.get('unique_xref_count', 0) or 0),
-                    int(pathway.get('total_genes', 0)),
-                    pathway.get('gene_count_basis', ''),
-                    matched_gene_count,
-                    int(pathway.get('genes_with_guides', 0)),
-                    float(pathway.get('pw_kfi_score', 0)),
-                    pathway.get('targetable_type', ''),
-                    float(pathway.get('coverage_rate', 0)),
-                    pathway.get('canonicalization_status', ''),
-                    pathway.get('gpml_file_path', '')
-                ))
-
-            unknown_mapping_pathways = (
-                set(pathway_genes) - set(matched_counts_by_pathway)
-            )
-            if unknown_mapping_pathways:
-                raise ValueError(
-                    "Pathway mapping contains unknown pathways: "
-                    + ', '.join(sorted(unknown_mapping_pathways))
-                )
-            for pathway_id, matched_gene_count in (
-                matched_counts_by_pathway.items()
-            ):
-                mapping_keys = [
-                    str(gene.get('pw_kfi_gene_key', '') or '')
-                    for gene in pathway_genes.get(pathway_id, [])
-                ]
-                if (
-                    any(not key for key in mapping_keys)
-                    or len(mapping_keys) != len(set(mapping_keys))
-                    or len(mapping_keys) != matched_gene_count
-                ):
-                    raise ValueError(
-                        "Canonical pathway mapping does not match "
-                        f"matched_gene_count for {pathway_id}"
-                    )
-            
-            # パスウェイ-遺伝子関係を挿入
-            for pathway_id, genes in pathway_genes.items():
-                for gene in genes:
-                    # guide_count の安全な変換
-                    guide_count = gene.get('guide_count', 0)
-                    if isinstance(guide_count, str):
-                        try:
-                            guide_count = int(guide_count)
-                        except ValueError:
-                            guide_count = 0
-                    elif not isinstance(guide_count, int):
-                        guide_count = 0
-                    
-                    cursor.execute('''
-                        INSERT INTO pathway_gene_relations (
-                            pathway_id, pathway_gene_database, pathway_gene_id,
-                            gene_key, pw_kfi_gene_key, pathway_xrefs,
-                            source_databases, node_occurrence_count,
-                            unique_xref_count, canonical_subject_id,
-                            canonicalization_methods,
-                            canonicalization_complete,
-                            annotation_source_database,
-                            matched_annotation_key, matched_annotation_id,
-                            resolved_annotation_subject_id, match_method,
-                            mapping_source, sgd_id, ensembl_id, unique_id,
-                            gene_sgd_id, gene_name, has_guides, guide_count
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        pathway_id,
-                        gene.get('pathway_gene_database', ''),
-                        gene.get('pathway_gene_id', ''),
-                        gene.get('gene_key', ''),
-                        gene.get('pw_kfi_gene_key', ''),
-                        gene.get('pathway_xrefs', ''),
-                        gene.get('source_databases', ''),
-                        int(gene.get('node_occurrence_count', 0) or 0),
-                        int(gene.get('unique_xref_count', 0) or 0),
-                        gene.get('canonical_subject_id', ''),
-                        gene.get('canonicalization_methods', ''),
-                        str(gene.get(
-                            'canonicalization_complete', 'False'
-                        )).lower() == 'true',
-                        gene.get('annotation_source_database', ''),
-                        gene.get('matched_annotation_key', ''),
-                        gene.get('matched_annotation_id', ''),
-                        gene.get('resolved_annotation_subject_id', ''),
-                        gene.get('match_method', ''),
-                        gene.get('mapping_source', ''),
-                        gene.get('sgd_id', ''),
-                        gene.get('ensembl_id', ''),
-                        gene.get('unique_id', ''),
-                        gene.get('gene_sgd_id', ''),
-                        gene.get('gene_name', ''),
-                        str(gene.get('has_guides', 'False')).lower() == 'true',
-                        guide_count
-                    ))
-
-            for audit_row in pathway_gene_audit or []:
-                cursor.execute('''
-                    INSERT INTO pathway_gene_match_audit (
-                        pathway_id, pathway_name, gpml_file_path,
-                        pathway_gene_database, pathway_gene_id,
-                        pathway_gene_name, gene_key, annotation_key,
-                        pw_kfi_gene_key, node_occurrence_count,
-                        denominator_contribution, included_in_denominator,
-                        status, reason, canonical_subject_id,
-                        canonicalization_methods, canonicalization_complete,
-                        pathway_canonicalization_status, match_method,
-                        mapping_source, annotation_source_database,
-                        matched_annotation_key, matched_annotation_id,
-                        resolved_annotation_subject_id, sgd_id, ensembl_id,
-                        unique_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    audit_row.get('pathway_id', ''),
-                    audit_row.get('pathway_name', ''),
-                    audit_row.get('gpml_file_path', ''),
-                    audit_row.get('pathway_gene_database', ''),
-                    audit_row.get('pathway_gene_id', ''),
-                    audit_row.get('pathway_gene_name', ''),
-                    audit_row.get('gene_key', ''),
-                    audit_row.get('annotation_key', ''),
-                    audit_row.get('pw_kfi_gene_key', ''),
-                    int(audit_row.get('node_occurrence_count', 0) or 0),
-                    int(audit_row.get('denominator_contribution', 0) or 0),
-                    str(audit_row.get(
-                        'included_in_denominator', 'False'
-                    )).lower() == 'true',
-                    audit_row.get('status', ''),
-                    audit_row.get('reason', ''),
-                    audit_row.get('canonical_subject_id', ''),
-                    audit_row.get('canonicalization_methods', ''),
-                    str(audit_row.get(
-                        'canonicalization_complete', 'False'
-                    )).lower() == 'true',
-                    audit_row.get('pathway_canonicalization_status', ''),
-                    audit_row.get('match_method', ''),
-                    audit_row.get('mapping_source', ''),
-                    audit_row.get('annotation_source_database', ''),
-                    audit_row.get('matched_annotation_key', ''),
-                    audit_row.get('matched_annotation_id', ''),
-                    audit_row.get('resolved_annotation_subject_id', ''),
-                    audit_row.get('sgd_id', ''),
-                    audit_row.get('ensembl_id', ''),
-                    audit_row.get('unique_id', ''),
-                ))
-            
-            conn.commit()
-        
-        self.logger.info("Pathway data insertion into the database is complete.")
     
     def parse_gpml_file(self, gpml_file_path):
         """
@@ -3686,9 +3275,12 @@ class PathwayReportGenerator:
         # ロゴファイルのコピー
         img_dir = os.path.join(self.output_dir, 'static', 'img')
         Path(img_dir).mkdir(parents=True, exist_ok=True)
-        src_logo = os.path.join('src', 'web', 'static', 'img', 'logo.png')
+        src_logo = (
+            Path(__file__).resolve().parents[1]
+            / 'web' / 'static' / 'img' / 'logo.png'
+        )
         dst_logo = os.path.join(img_dir, 'logo.png')
-        if os.path.exists(src_logo):
+        if src_logo.exists():
             shutil.copy2(src_logo, dst_logo)
             self.logger.info(f"Logo copied: {src_logo} -> {dst_logo}")
         
@@ -3709,16 +3301,10 @@ class PathwayReportGenerator:
             
             # データロード
             pathways, pathway_genes = self.load_pathway_analysis_results()
-            pathway_gene_audit = self.load_pathway_gene_match_audit()
+            manifest_path = str(self.report_source_store.manifest_path)
             
             # パスウェイ別ガイドCSVデータ生成
             pathway_guide_data = self.generate_pathway_guide_csv_data(pathways)
-            
-            # データベーステーブル作成・データ挿入
-            db_path = self.create_pathway_database_tables()
-            self.populate_pathway_database(
-                pathways, pathway_genes, db_path, pathway_gene_audit
-            )
             
             # JSONサマリー生成（ガイドデータとSVGデータを含む）
             summary_data = self.generate_pathway_json_summary(
@@ -3730,9 +3316,9 @@ class PathwayReportGenerator:
             
             # 結果まとめ
             results = {
-                'database_path': db_path,
                 'summary_json_path': os.path.join(self.web_data_dir, 'pathway_summary.json'),
                 'html_report_path': report_path,
+                'report_sources_manifest': manifest_path,
                 'statistics': summary_data['statistics']['pathway_analysis'],
                 'pathway_guide_data': pathway_guide_data
             }

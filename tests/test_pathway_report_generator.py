@@ -1,7 +1,6 @@
 import csv
 import json
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -164,6 +163,27 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             writer.writeheader()
             writer.writerow(mapping)
         return pathway, mapping
+
+    @staticmethod
+    def write_gpml(path, pathway_name='Strict pathway'):
+        path.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Pathway xmlns="http://pathvisio.org/GPML/2013a" '
+            f'Name="{pathway_name}" Organism="Saccharomyces cerevisiae">'
+            '<DataNode TextLabel="BDH1" GraphId="n1" Type="GeneProduct">'
+            '<Graphics CenterX="100" CenterY="100" Width="80" Height="20" />'
+            '<Xref Database="Ensembl" ID="YAL060W" />'
+            '</DataNode></Pathway>',
+            encoding='utf-8',
+        )
+        return path
+
+    @staticmethod
+    def embedded_pathway_data(report_path):
+        content = Path(report_path).read_text(encoding='utf-8')
+        marker = '<script type="application/json" id="pathway-data">'
+        payload = content.split(marker, 1)[1].split('</script>', 1)[0]
+        return json.loads(payload)
 
     def test_svg_uses_exact_database_and_identifier_composite_key(self):
         pathway_data = {
@@ -393,114 +413,15 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             ['Ensembl::YAL060W', 'SGD::S000000056'],
         )
 
-    def test_database_migrates_old_relation_schema_and_inserts_ensembl(self):
-        db_path = Path(self.generator.web_data_dir) / 'twheel_data.db'
-        with sqlite3.connect(db_path) as connection:
-            connection.execute('''
-                CREATE TABLE pathway_gene_relations (
-                    id INTEGER PRIMARY KEY,
-                    pathway_id TEXT,
-                    gene_sgd_id TEXT,
-                    gene_name TEXT,
-                    has_guides BOOLEAN,
-                    guide_count INTEGER
-                )
-            ''')
-
-        created_path = self.generator.create_pathway_database_tables()
-        with sqlite3.connect(created_path) as connection:
-            columns = {
-                row[1]
-                for row in connection.execute(
-                    'PRAGMA table_info(pathway_gene_relations)'
-                )
-            }
-        self.assertIn('pathway_gene_database', columns)
-        self.assertIn('pathway_gene_id', columns)
-        self.assertIn('annotation_source_database', columns)
-        self.assertIn('ensembl_id', columns)
-        self.assertIn('pw_kfi_gene_key', columns)
-        self.assertIn('pathway_xrefs', columns)
-        self.assertIn('node_occurrence_count', columns)
-
-        with sqlite3.connect(created_path) as connection:
-            info_columns = {
-                row[1]
-                for row in connection.execute(
-                    'PRAGMA table_info(pathway_info)'
-                )
-            }
-        self.assertIn('gene_count_basis', info_columns)
-
-        pathways = [{
-            'pathway_id': 'WP9999',
-            'pathway_name': 'Strict pathway',
-            'pathway_organism': 'Saccharomyces cerevisiae',
-            'total_genes': '1',
-            'gene_count_basis': 'exact_canonical_gene_units',
-            'canonicalization_status': 'complete',
-            'matched_genes': repr([self.matched_gene()]),
-            'genes_with_guides': '1',
-            'pw_kfi_score': '1',
-            'targetable_type': 'Fully targetable',
-            'coverage_rate': '1',
-            'gpml_file_path': '/data/WP9999.gpml',
-        }]
-        mapping = self.matched_gene(
-            gene_sgd_id='', has_guides='True', guide_count='1'
-        )
-        audit_rows = [{
-            'pathway_id': 'WP9999',
-            'pathway_name': 'Strict pathway',
-            'gpml_file_path': '/data/WP9999.gpml',
-            'pathway_gene_database': 'Ensembl',
-            'pathway_gene_id': 'YBR160W',
-            'pathway_gene_name': 'CDC28',
-            'gene_key': 'Ensembl::YBR160W',
-            'annotation_key': 'ensembl_id',
-            'included_in_denominator': 'True',
-            'status': 'unmatched',
-            'reason': 'annotation_not_found',
-        }]
-        self.generator.populate_pathway_database(
-            pathways, {'WP9999': [mapping]}, created_path, audit_rows
-        )
-
-        with sqlite3.connect(created_path) as connection:
-            row = connection.execute('''
-                SELECT pathway_gene_database, pathway_gene_id,
-                       annotation_source_database, sgd_id, ensembl_id,
-                       gene_sgd_id
-                FROM pathway_gene_relations
-            ''').fetchone()
-            matched_gene_count = connection.execute(
-                'SELECT matched_genes FROM pathway_info'
-            ).fetchone()[0]
-            audit_row = connection.execute('''
-                SELECT pathway_gene_database, pathway_gene_id, status, reason,
-                       included_in_denominator
-                FROM pathway_gene_match_audit
-            ''').fetchone()
-            gene_count_basis = connection.execute(
-                'SELECT gene_count_basis FROM pathway_info'
-            ).fetchone()[0]
-        self.assertEqual(
-            row,
-            ('Ensembl', 'YAL060W', 'SGD', 'S000000056', 'YAL060W', ''),
-        )
-        self.assertEqual(matched_gene_count, 1)
-        self.assertEqual(gene_count_basis, 'exact_canonical_gene_units')
-        self.assertEqual(
-            audit_row,
-            ('Ensembl', 'YBR160W', 'unmatched', 'annotation_not_found', 1),
-        )
-
     def test_legacy_node_count_pathway_table_is_rejected(self):
         kfi_path = self.intermediate_dir / 'pathway_kfi_table.csv'
         kfi_path.write_text(
             'pathway_id,pathway_name,total_genes,genes_with_guides,pw_kfi_score\n'
             'WP1,Legacy,2,2,1.0\n',
             encoding='utf-8',
+        )
+        (self.intermediate_dir / 'pathway_gene_mapping.tsv').write_text(
+            '', encoding='utf-8'
         )
 
         with self.assertRaisesRegex(
@@ -593,26 +514,6 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         ):
             self.generator.load_pathway_analysis_results()
 
-    def test_database_rejects_duplicate_canonical_relation_keys(self):
-        db_path = self.generator.create_pathway_database_tables()
-        pathway = {
-            'pathway_id': 'WP9993',
-            'pathway_name': 'Duplicate relation keys',
-            'total_genes': '1',
-            'matched_gene_count': '1',
-            'genes_with_guides': '1',
-            'pw_kfi_score': '1',
-            'coverage_rate': '1',
-        }
-        duplicate = self.matched_gene()
-
-        with self.assertRaisesRegex(
-            ValueError, 'Canonical pathway mapping does not match'
-        ):
-            self.generator.populate_pathway_database(
-                [pathway], {'WP9993': [duplicate, duplicate]}, db_path
-            )
-
     def test_malformed_serialized_gene_data_fails_instead_of_rendering_unknown(self):
         gpml_path = self.temp_dir / 'WP9996.gpml'
         gpml_path.write_text(
@@ -645,22 +546,167 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             summary['statistics']['svg_generation']['failure_reasons']['WP9996'],
         )
 
-    def test_database_rejects_unparseable_matched_gene_count(self):
-        db_path = self.generator.create_pathway_database_tables()
-        pathways = [{
-            'pathway_id': 'WP9995',
-            'pathway_name': 'Broken count',
-            'total_genes': '1',
-            'matched_gene_count': 'invalid',
-            'genes_with_guides': '0',
-            'pw_kfi_score': '0',
-            'coverage_rate': '0',
-        }]
+    def test_run_uses_staged_sources_after_intermediate_and_gpml_are_removed(self):
+        gpml_path = self.write_gpml(self.temp_dir / 'WP9999.gpml')
+        self.write_canonical_artifacts(
+            pathway_overrides={'gpml_file_path': str(gpml_path)}
+        )
+        database_path = Path(self.generator.web_data_dir) / 'twheel_data.db'
+        database_path.write_bytes(b'pre-existing database sentinel')
 
-        with self.assertRaisesRegex(ValueError, 'Invalid matched_gene_count'):
-            self.generator.populate_pathway_database(
-                pathways, {}, db_path
-            )
+        first_results = self.generator.run()
+        first_embedded = self.embedded_pathway_data(
+            first_results['html_report_path']
+        )
+
+        self.assertNotIn('database_path', first_results)
+        self.assertEqual(
+            database_path.read_bytes(), b'pre-existing database sentinel'
+        )
+        manifest_path = Path(first_results['report_sources_manifest'])
+        snapshot = self.generator.report_source_store.load_namespace('pathway')
+        self.assertIn('pathway_kfi_table', snapshot)
+        self.assertIn('pathway_gene_mapping', snapshot)
+        self.assertIn('gpml.WP9999', snapshot)
+
+        shutil.rmtree(self.intermediate_dir)
+        gpml_path.unlink()
+        second_results = PathwayReportGenerator(self.generator.config).run()
+        second_embedded = self.embedded_pathway_data(
+            second_results['html_report_path']
+        )
+        summary = json.loads(
+            Path(second_results['summary_json_path']).read_text(encoding='utf-8')
+        )
+
+        first_embedded['summary'].pop('timestamp', None)
+        second_embedded['summary'].pop('timestamp', None)
+        self.assertEqual(second_embedded, first_embedded)
+        self.assertEqual(summary['statistics']['svg_generation']['success'], 1)
+        self.assertTrue(Path(second_results['html_report_path']).is_file())
+        self.assertTrue(manifest_path.is_file())
+        self.assertFalse(self.intermediate_dir.exists())
+        self.assertEqual(
+            database_path.read_bytes(), b'pre-existing database sentinel'
+        )
+
+    def test_invalid_current_pair_preserves_previous_snapshot(self):
+        gpml_path = self.write_gpml(self.temp_dir / 'WP9999.gpml')
+        self.write_canonical_artifacts(
+            pathway_overrides={'gpml_file_path': str(gpml_path)}
+        )
+        self.generator.run()
+        manifest_path = self.generator.report_source_store.manifest_path
+        manifest_before = manifest_path.read_bytes()
+        snapshot_before = {
+            key: Path(path).read_bytes()
+            for key, path in self.generator.report_source_store.load_namespace(
+                'pathway'
+            ).items()
+        }
+        (self.intermediate_dir / 'pathway_kfi_table.csv').write_text(
+            'pathway_id,pathway_name\nWP9999,broken\n',
+            encoding='utf-8',
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, 'Legacy or incomplete PW-KFI table'
+        ):
+            self.generator.load_pathway_analysis_results()
+
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        snapshot_after = self.generator.report_source_store.load_namespace(
+            'pathway'
+        )
+        self.assertEqual(
+            {key: Path(path).read_bytes() for key, path in snapshot_after.items()},
+            snapshot_before,
+        )
+        shutil.rmtree(self.intermediate_dir)
+        regenerated = PathwayReportGenerator(self.generator.config).run()
+        summary = json.loads(
+            Path(regenerated['summary_json_path']).read_text(encoding='utf-8')
+        )
+        self.assertEqual(summary['statistics']['svg_generation']['success'], 1)
+
+    def test_new_tables_with_missing_gpml_do_not_reuse_old_snapshot(self):
+        gpml_path = self.write_gpml(self.temp_dir / 'WP9999.gpml')
+        self.write_canonical_artifacts(
+            pathway_overrides={'gpml_file_path': str(gpml_path)}
+        )
+        self.generator.run()
+        first_snapshot = self.generator.report_source_store.load_namespace(
+            'pathway'
+        )
+        self.assertIn('gpml.WP9999', first_snapshot)
+
+        self.write_canonical_artifacts(pathway_overrides={
+            'gpml_file_path': str(self.temp_dir / 'missing-WP9999.gpml')
+        })
+        results = self.generator.run()
+        summary = json.loads(
+            Path(results['summary_json_path']).read_text(encoding='utf-8')
+        )
+        second_snapshot = self.generator.report_source_store.load_namespace(
+            'pathway'
+        )
+
+        self.assertNotIn('gpml.WP9999', second_snapshot)
+        self.assertEqual(summary['statistics']['svg_generation']['success'], 0)
+        self.assertEqual(summary['statistics']['svg_generation']['no_gpml'], 1)
+
+    def test_existing_but_empty_or_partial_intermediate_never_falls_back(self):
+        self.write_canonical_artifacts()
+        self.generator.load_pathway_analysis_results()
+        mapping_path = self.intermediate_dir / 'pathway_gene_mapping.tsv'
+        kfi_path = self.intermediate_dir / 'pathway_kfi_table.csv'
+
+        mapping_path.unlink()
+        with self.assertRaisesRegex(
+            FileNotFoundError,
+            'Incomplete pathway report source snapshot in intermediate',
+        ):
+            self.generator.load_pathway_analysis_results()
+
+        kfi_path.unlink()
+        with self.assertRaisesRegex(
+            FileNotFoundError,
+            'Pathway report sources are absent from intermediate',
+        ):
+            self.generator.load_pathway_analysis_results()
+
+    def test_gpml_snapshot_names_resist_sanitization_collisions(self):
+        first_key, first_path = self.generator._gpml_source_entry('A/B')
+        second_key, second_path = self.generator._gpml_source_entry('A_B')
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertNotEqual(first_path, second_path)
+        self.assertTrue(first_path.startswith('pathway/gpml/A_B-'))
+        self.assertTrue(second_path.startswith('pathway/gpml/A_B-'))
+
+    def test_duplicate_canonical_mapping_rows_are_rejected(self):
+        self.write_canonical_artifacts()
+        mapping_path = self.intermediate_dir / 'pathway_gene_mapping.tsv'
+        lines = mapping_path.read_text(encoding='utf-8').splitlines()
+        mapping_path.write_text(
+            '\n'.join([lines[0], lines[1], lines[1]]) + '\n',
+            encoding='utf-8',
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, 'Pathway mapping does not reconcile'
+        ):
+            self.generator.load_pathway_analysis_results()
+
+    def test_unparseable_matched_gene_count_is_rejected_by_loader(self):
+        self.write_canonical_artifacts(pathway_overrides={
+            'matched_gene_count': 'invalid'
+        })
+
+        with self.assertRaisesRegex(
+            ValueError, 'Invalid matched_gene_count for WP9999'
+        ):
+            self.generator.load_pathway_analysis_results()
 
     def test_html_guide_lookup_has_no_gene_name_fallback(self):
         html_content = self.generator.create_pathway_html_template(

@@ -18,19 +18,29 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 
+from .report_source_store import ReportSourceStore
+
 # CSVフィールドサイズ制限を増加
 csv.field_size_limit(1 << 30)
 
 class ReportGenerator:
     """Report generation processing class"""
 
-    DATABASE_SCHEMA_VERSION = 2
-    DATABASE_SOURCE_KEYS = (
-        'annotation_table',
-        'final_annotation_guides',
-        'go_kfi_table',
-        'go_reverse_lookup',
-    )
+    DATABASE_SCHEMA_VERSION = 3
+    REPORT_SOURCE_FILES = {
+        'transcriptome': 'transcriptome.fa',
+        'protein_sequences': 'query.pep',
+        'annotation_table': 'annotation_classified.txt',
+        'multi_gene_targets': 'multi_genes_targets_specific_clean.bed',
+        'single_gene_targets': 'single_genes_targets_specific_clean.bed',
+        'final_annotation_guides': 'annotation_with_guides_final.tsv',
+        'go_kfi_stat': 'go_kfi_stat.csv',
+        'go_kfi_table': 'go_kfi_table.csv',
+        'go_reverse_lookup': 'go_reverse_lookup.tsv',
+        'go_parent_counts': 'go_parent_counts.csv',
+        'go_parent_counts_image': 'go_parent_counts.png',
+        'go_parent_counts_treemap_image': 'treemap_go_parent_counts.png',
+    }
     
     def __init__(self, config):
         """
@@ -44,6 +54,73 @@ class ReportGenerator:
         self.intermediate_dir = self.config['output']['intermediate']
         self.output_dir = self.config['output']['base_dir']
         self.web_data_dir = os.path.join(self.output_dir, 'web_data')
+        self.report_source_store = ReportSourceStore(self.web_data_dir)
+
+    def _stage_report_sources(self, results):
+        """Publish one immutable source generation for the standard report."""
+        if results.get('_report_sources_staged'):
+            return results.get(
+                'report_sources_manifest',
+                str(self.report_source_store.manifest_path),
+            )
+
+        data = results.setdefault('data', {})
+        intermediate_exists = Path(self.intermediate_dir).is_dir()
+        explicit_sources = {
+            key: str(path)
+            for key, path in data.items()
+            if key in self.REPORT_SOURCE_FILES
+            and path
+            and os.path.isfile(path)
+        }
+
+        # A missing intermediate directory explicitly requests regeneration
+        # from the last complete, verified report-source generation.
+        if not intermediate_exists and not explicit_sources:
+            report_data = self.report_source_store.load_namespace('normal')
+            if report_data:
+                results['report_data'] = report_data
+                results['report_sources_manifest'] = str(
+                    self.report_source_store.manifest_path
+                )
+                results['_report_sources_staged'] = True
+                return results['report_sources_manifest']
+
+        sources = {}
+        for key, filename in self.REPORT_SOURCE_FILES.items():
+            source_path = explicit_sources.get(key)
+            if not source_path and intermediate_exists:
+                intermediate_path = os.path.join(
+                    self.intermediate_dir, filename
+                )
+                if os.path.isfile(intermediate_path):
+                    source_path = intermediate_path
+            if not source_path and key == 'transcriptome':
+                configured_path = self.config.get('input', {}).get(
+                    'transcriptome'
+                )
+                if configured_path and os.path.isfile(configured_path):
+                    source_path = configured_path
+
+            if source_path:
+                sources[key] = (source_path, filename)
+
+        results['report_data'] = self.report_source_store.publish_namespace(
+            'normal', sources
+        )
+        results['report_sources_manifest'] = str(
+            self.report_source_store.manifest_path
+        )
+        results['_report_sources_staged'] = True
+        return results['report_sources_manifest']
+
+    @staticmethod
+    def _report_data_path(results, key):
+        """Resolve a report input, preferring the durable staged snapshot."""
+        return (
+            (results.get('report_data') or {}).get(key)
+            or (results.get('data') or {}).get(key)
+        )
         
     def collect_all_results(self):
         """Collect results from all steps"""
@@ -75,18 +152,25 @@ class ReportGenerator:
             'transcriptome': 'transcriptome.fa',
             'protein_sequences': 'query.pep',
             'annotation_table': 'annotation_classified.txt',
+            'multi_gene_targets': 'multi_genes_targets_specific_clean.bed',
+            'single_gene_targets': 'single_genes_targets_specific_clean.bed',
             'final_annotation_guides': 'annotation_with_guides_final.tsv',
             'go_annotated': 'annotation_with_guides_go.tsv',
             'go_kfi_table': 'go_kfi_table.csv',
             'go_kfi_stat': 'go_kfi_stat.csv',
             'fully_targetable_gos': 'go_kfi_table_fully_targetable.csv',
-            'go_reverse_lookup': 'go_reverse_lookup.tsv'
+            'go_reverse_lookup': 'go_reverse_lookup.tsv',
+            'go_parent_counts': 'go_parent_counts.csv',
+            'go_parent_counts_image': 'go_parent_counts.png',
+            'go_parent_counts_treemap_image': 'treemap_go_parent_counts.png',
         }
         
         for name, filename in data_files.items():
             filepath = os.path.join(self.intermediate_dir, filename)
             if os.path.exists(filepath):
                 results['data'][name] = filepath
+
+        self._stage_report_sources(results)
         
         # Collect statistics (pass results for new guide RNA statistics)
         results['statistics'] = self._collect_statistics(results)
@@ -106,14 +190,17 @@ class ReportGenerator:
         # Gene prediction statistics
         try:
             # Count total transcripts from transcriptome.fa
-            transcriptome_path = self.config['input'].get('transcriptome')
+            transcriptome_path = (
+                self._report_data_path(results, 'transcriptome')
+                or self.config['input'].get('transcriptome')
+            )
             if transcriptome_path and os.path.exists(transcriptome_path):
                 stats['gene_prediction']['transcript_count'] = self._count_fasta_sequences(transcriptome_path)
             else:
                 stats['gene_prediction']['transcript_count'] = 0
             
-            protein_path = os.path.join(self.intermediate_dir, 'query.pep')
-            if os.path.exists(protein_path):
+            protein_path = self._report_data_path(results, 'protein_sequences')
+            if protein_path and os.path.exists(protein_path):
                 protein_data = self._parse_protein_file(protein_path)
                 stats['gene_prediction']['protein_count'] = len(protein_data['proteins'])
                 stats['gene_prediction']['protein_stats'] = protein_data['stats']
@@ -124,8 +211,8 @@ class ReportGenerator:
         
         # Annotation statistics
         try:
-            annotation_path = os.path.join(self.intermediate_dir, 'annotation_classified.txt')
-            if os.path.exists(annotation_path):
+            annotation_path = self._report_data_path(results, 'annotation_table')
+            if annotation_path and os.path.exists(annotation_path):
                 multi_count, single_count = self._count_gene_classifications(annotation_path)
                 stats['annotation']['multi_genes'] = multi_count
                 stats['annotation']['single_genes'] = single_count
@@ -135,12 +222,12 @@ class ReportGenerator:
         
         # Guide design statistics
         try:
-            multi_targets = os.path.join(self.intermediate_dir, 'multi_genes_targets_specific_clean.bed')
-            single_targets = os.path.join(self.intermediate_dir, 'single_genes_targets_specific_clean.bed')
+            multi_targets = self._report_data_path(results, 'multi_gene_targets')
+            single_targets = self._report_data_path(results, 'single_gene_targets')
             
-            if os.path.exists(multi_targets):
+            if multi_targets and os.path.exists(multi_targets):
                 stats['guide_design']['multi_targets'] = self._count_lines(multi_targets)
-            if os.path.exists(single_targets):
+            if single_targets and os.path.exists(single_targets):
                 stats['guide_design']['single_targets'] = self._count_lines(single_targets)
             
             # 新しい詳細なガイドRNA統計を追加
@@ -152,8 +239,8 @@ class ReportGenerator:
         
         # GO analysis statistics
         try:
-            kfi_stat_path = os.path.join(self.intermediate_dir, 'go_kfi_stat.csv')
-            if os.path.exists(kfi_stat_path):
+            kfi_stat_path = self._report_data_path(results, 'go_kfi_stat')
+            if kfi_stat_path and os.path.exists(kfi_stat_path):
                 stats['go_analysis'] = self._parse_go_kfi_stats(kfi_stat_path)
         except Exception as e:
             self.logger.warning(f"GO analysis statistics collection error: {e}")
@@ -204,7 +291,9 @@ class ReportGenerator:
             'site_specific_single_target': 0
         }
         
-        annotation_path = results['data'].get('final_annotation_guides')
+        annotation_path = self._report_data_path(
+            results, 'final_annotation_guides'
+        )
         if not annotation_path or not os.path.exists(annotation_path):
             return stats
         
@@ -536,7 +625,9 @@ class ReportGenerator:
             f.write("-" * 30 + "\n")
             f.write(f"HTML report: {os.path.join(self.output_dir, 'report.html')}\n")
             f.write(f"Web data: {self.web_data_dir}\n")
-            f.write(f"Intermediate files: {self.intermediate_dir}\n")
+            f.write(
+                f"Report sources: {self.report_source_store.root}\n"
+            )
             
             f.write("\n")
             f.write("For detailed analysis results, please refer to the HTML report (report.html).\n")
@@ -544,33 +635,28 @@ class ReportGenerator:
         self.logger.info(f"Text summary generated: {summary_path}")
         return summary_path
     
-    @staticmethod
-    def _hash_file(file_path):
-        """Return a content digest for a database source file."""
-        digest = hashlib.sha256()
-        with open(file_path, 'rb') as source_file:
-            for chunk in iter(lambda: source_file.read(1024 * 1024), b''):
-                digest.update(chunk)
-        return digest.hexdigest()
+    def _database_go_ids(self, results):
+        """Return the normalized GO identifier set stored in the cache DB."""
+        kfi_table_path = self._report_data_path(results, 'go_kfi_table')
+        if not kfi_table_path or not os.path.isfile(kfi_table_path):
+            return []
 
-    def _database_input_fingerprint(self, results):
-        """Return a stable fingerprint of every source used to build the DB."""
-        source_state = {}
-        data_files = results.get('data') or {}
+        go_ids = set()
+        with open(kfi_table_path, 'r', encoding='utf-8', newline='') as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            for row in reader:
+                if row and row[0].strip():
+                    go_ids.add(row[0].strip())
+        return sorted(go_ids)
 
-        for source_name in self.DATABASE_SOURCE_KEYS:
-            source_path = data_files.get(source_name)
-            if source_path and os.path.isfile(source_path):
-                source_state[source_name] = {
-                    'size': os.path.getsize(source_path),
-                    'sha256': self._hash_file(source_path),
-                }
-            else:
-                source_state[source_name] = None
-
+    def _database_input_fingerprint(self, results, go_ids=None):
+        """Fingerprint only the GO identifiers that the cache stores."""
+        if go_ids is None:
+            go_ids = self._database_go_ids(results)
         payload = {
             'schema_version': self.DATABASE_SCHEMA_VERSION,
-            'sources': source_state,
+            'go_ids': go_ids,
         }
         serialized = json.dumps(
             payload,
@@ -579,7 +665,12 @@ class ReportGenerator:
         ).encode('utf-8')
         return hashlib.sha256(serialized).hexdigest()
 
-    def _check_database_exists(self, db_path, expected_fingerprint):
+    def _check_database_exists(
+        self,
+        db_path,
+        expected_fingerprint,
+        expected_go_ids,
+    ):
         """Check whether a database is complete and matches current inputs."""
         if not os.path.exists(db_path):
             self.logger.info("Database file does not exist.")
@@ -611,6 +702,12 @@ class ReportGenerator:
                 ):
                     return False
 
+                if not self._check_database_go_terms(
+                    cursor,
+                    expected_go_ids,
+                ):
+                    return False
+
             self.logger.info(f"An existing valid database was detected.: {db_path}")
             return True
             
@@ -619,42 +716,60 @@ class ReportGenerator:
             return False
     
     def _verify_database_structure(self, cursor):
-        """Verify that all required tables exist"""
-        required_tables = [
-            'genes',
-            'guide_rnas',
-            'go_terms',
-            'gene_go_relations',
-            'report_metadata',
-        ]
-        
+        """Verify the exact minimal cache schema."""
+        required_columns = {
+            'report_metadata': ('key', 'value'),
+            'go_terms': ('go_id', 'go_name', 'go_definition'),
+        }
+
         try:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            existing_tables = [row[0] for row in cursor.fetchall()]
-            
-            missing_tables = [table for table in required_tables if table not in existing_tables]
-            
-            if missing_tables:
-                self.logger.warning(f"Missing tables: {missing_tables}")
+            existing_tables = {
+                row[0] for row in cursor.fetchall()
+                if not row[0].startswith('sqlite_')
+            }
+            if existing_tables != set(required_columns):
+                self.logger.warning(
+                    "Report cache tables do not match the minimal schema: "
+                    f"{sorted(existing_tables)}"
+                )
                 return False
-            
+
+            for table_name, expected_columns in required_columns.items():
+                actual_columns = tuple(
+                    row[1] for row in cursor.execute(
+                        f'PRAGMA table_info({table_name})'
+                    ).fetchall()
+                )
+                if actual_columns != expected_columns:
+                    self.logger.warning(
+                        f"Unexpected columns in {table_name}: {actual_columns}"
+                    )
+                    return False
+
             self.logger.info("Checked the database table structure.")
             return True
-            
+
         except sqlite3.Error as e:
             self.logger.warning(f"Database structure verification error: {e}")
             return False
 
     def _check_database_metadata(self, cursor, expected_fingerprint):
         """Check schema version and source fingerprint stored in the DB."""
+        expected_keys = {'schema_version', 'input_fingerprint'}
         try:
-            cursor.execute(
-                "SELECT key, value FROM report_metadata "
-                "WHERE key IN ('schema_version', 'input_fingerprint')"
-            )
-            metadata = dict(cursor.fetchall())
+            rows = cursor.execute(
+                "SELECT key, value FROM report_metadata"
+            ).fetchall()
+            metadata = dict(rows)
         except sqlite3.Error as error:
             self.logger.warning(f"Database metadata check error: {error}")
+            return False
+
+        if len(rows) != len(expected_keys) or set(metadata) != expected_keys:
+            self.logger.info(
+                "Database metadata keys do not match the minimal schema."
+            )
             return False
 
         if metadata.get('schema_version') != str(self.DATABASE_SCHEMA_VERSION):
@@ -665,23 +780,62 @@ class ReportGenerator:
             return False
         return True
 
+    def _check_database_go_terms(self, cursor, expected_go_ids):
+        """Verify that the cache contains exactly the expected populated terms."""
+        try:
+            rows = cursor.execute(
+                "SELECT go_id, go_name, go_definition FROM go_terms"
+            ).fetchall()
+        except sqlite3.Error as error:
+            self.logger.warning(f"Database GO cache check error: {error}")
+            return False
+
+        expected_ids = set(expected_go_ids)
+        actual_ids = {row[0] for row in rows}
+        if len(rows) != len(actual_ids) or actual_ids != expected_ids:
+            missing_ids = sorted(
+                expected_ids - actual_ids,
+                key=lambda value: str(value),
+            )
+            extra_ids = sorted(
+                actual_ids - expected_ids,
+                key=lambda value: str(value),
+            )
+            self.logger.info(
+                "Database GO identifiers do not match current report data: "
+                f"missing={missing_ids}, extra={extra_ids}"
+            )
+            return False
+
+        for go_id, go_name, go_definition in rows:
+            if not self._go_term_has_content({
+                'name': go_name,
+                'definition': go_definition,
+            }):
+                self.logger.info(
+                    f"Database GO term has no cached content: {go_id}"
+                )
+                return False
+
+        return True
+
     def prepare_web_data(self, results):
-        """Prepare data for web application in JSON and SQLite formats"""
+        """Stage report inputs and prepare JSON plus the minimal GO cache."""
         self.logger.info("Preparing web data...")
-        
-        # Create web data directory if it doesn't exist
+
         Path(self.web_data_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Create SQLite database
+        if not results.get('_report_sources_staged'):
+            self._stage_report_sources(results)
+
         db_path = os.path.join(self.web_data_dir, 'twheel_data.db')
-        input_fingerprint = self._database_input_fingerprint(results)
-        
-        # Check for force rebuild flag in config
+        go_ids = self._database_go_ids(results)
+        input_fingerprint = self._database_input_fingerprint(results, go_ids)
         force_rebuild = self.config.get('database', {}).get('force_rebuild', False)
-        
+
         if not force_rebuild and self._check_database_exists(
             db_path,
             input_fingerprint,
+            go_ids,
         ):
             self.logger.info("Use an existing database. Skip database creation.")
         else:
@@ -689,11 +843,25 @@ class ReportGenerator:
                 self.logger.info("The forced regeneration flag is set. A new database will be created.")
             else:
                 self.logger.info("The database does not exist or is invalid. A new one will be created.")
-            
-            self._rebuild_database(db_path, results, input_fingerprint)
+
+            self._rebuild_database(
+                db_path,
+                results,
+                input_fingerprint,
+                go_ids=go_ids,
+                refresh_all=force_rebuild,
+            )
             self.logger.info(f"Database creation complete.: {db_path}")
-        
-        # Save basic statistics in JSON format
+
+        report_sources = {}
+        for key, source_path in (results.get('report_data') or {}).items():
+            try:
+                report_sources[key] = os.path.relpath(
+                    source_path, self.web_data_dir
+                )
+            except (TypeError, ValueError):
+                continue
+
         json_data = {
             'timestamp': results['timestamp'],
             'statistics': results['statistics'],
@@ -701,7 +869,8 @@ class ReportGenerator:
                 'input': results['config']['input'],
                 'crispr': results['config']['crispr'],
                 'busco': results['config']['busco']
-            }
+            },
+            'report_sources': report_sources,
         }
         
         json_path = os.path.join(self.web_data_dir, 'summary.json')
@@ -711,8 +880,19 @@ class ReportGenerator:
         self.logger.info(f"Web data prepared: {db_path}, {json_path}")
         return db_path, json_path
 
-    def _rebuild_database(self, db_path, results, input_fingerprint):
-        """Build a complete temporary database and atomically publish it."""
+    def _rebuild_database(
+        self,
+        db_path,
+        results,
+        input_fingerprint,
+        go_ids=None,
+        refresh_all=False,
+    ):
+        """Build a minimal temporary cache and atomically publish it."""
+        if go_ids is None:
+            go_ids = self._database_go_ids(results)
+        cached_terms = self._load_cached_go_terms(db_path, go_ids)
+
         file_descriptor, temporary_path = tempfile.mkstemp(
             dir=self.web_data_dir,
             prefix='.twheel_data.',
@@ -724,15 +904,18 @@ class ReportGenerator:
             with sqlite3.connect(temporary_path) as conn:
                 cursor = conn.cursor()
                 self._create_database_tables(cursor)
-                self._insert_gene_data(cursor, results)
-                self._insert_guide_data(cursor, results)
-                self._insert_go_data(cursor, results)
+                self._insert_go_data(
+                    cursor,
+                    results,
+                    cached_terms,
+                    go_ids=go_ids,
+                    refresh_all=refresh_all,
+                )
                 cursor.executemany(
                     "INSERT INTO report_metadata (key, value) VALUES (?, ?)",
                     [
                         ('schema_version', str(self.DATABASE_SCHEMA_VERSION)),
                         ('input_fingerprint', input_fingerprint),
-                        ('built_at', datetime.now().isoformat()),
                     ],
                 )
                 conn.commit()
@@ -750,237 +933,121 @@ class ReportGenerator:
                 os.unlink(temporary_path)
     
     def _create_database_tables(self, cursor):
-        """Create database tables"""
-
+        """Create only tables whose rows tWhEEL reads later."""
         cursor.execute("""
             CREATE TABLE report_metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            )
+            ) WITHOUT ROWID
         """)
-        
-        # Gene table
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS genes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query_id TEXT,
-                subject_id TEXT,
-                gene_name TEXT,
-                classification TEXT,
-                unique_id TEXT,
-                identity REAL,
-                evalue REAL,
-                description TEXT,
-                guide_count INTEGER DEFAULT 0
-            )
+            CREATE TABLE go_terms (
+                go_id TEXT PRIMARY KEY,
+                go_name TEXT NOT NULL,
+                go_definition TEXT NOT NULL
+            ) WITHOUT ROWID
         """)
-        
-        # Guide RNA table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS guide_rnas (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                gene_unique_id TEXT,
-                chromosome TEXT,
-                start INTEGER,
-                end INTEGER,
-                sequence TEXT,
-                strand TEXT,
-                score REAL,
-                pam_sequence TEXT,
-                gc_content REAL,
-                FOREIGN KEY (gene_unique_id) REFERENCES genes(unique_id)
-            )
-        """)
-        
-        # GO term table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS go_terms (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                go_id TEXT,
-                go_name TEXT,
-                go_definition TEXT,
-                go_namespace TEXT,
-                total_genes INTEGER,
-                genes_with_guides INTEGER,
-                kfi_score REAL,
-                targetable_type TEXT,
-                annotated_genes TEXT,
-                annotated_genes_full TEXT
-            )
-        """)
-        
-        # Gene-GO relation table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS gene_go_relations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                gene_unique_id TEXT,
-                go_id TEXT,
-                FOREIGN KEY (gene_unique_id) REFERENCES genes(unique_id),
-                FOREIGN KEY (go_id) REFERENCES go_terms(go_id)
-            )
-        """)
-    
-    def _insert_gene_data(self, cursor, results):
-        """Insert gene data"""
-        
-        annotation_path = results['data'].get('annotation_table')
-        if not annotation_path or not os.path.exists(annotation_path):
-            return
-        
-        with open(annotation_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='\t')
-            header = next(reader)
-            
-            for row in reader:
-                if len(row) >= 10:
-                    cursor.execute("""
-                        INSERT INTO genes (
-                            query_id, subject_id, gene_name, classification,
-                            unique_id, identity, evalue, description
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        row[0], row[1], row[7], row[8], row[9],
-                        float(row[2]) if row[2] else 0.0,
-                        float(row[4]) if row[4] else 0.0,
-                        row[6]
-                    ))
-    
-    def _insert_guide_data(self, cursor, results):
-        """Insert guide RNA data and update guide counts"""
-        
-        final_table_path = results['data'].get('final_annotation_guides')
-        if not final_table_path or not os.path.exists(final_table_path):
-            return
-        
-        with open(final_table_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='\t')
-            header = next(reader)
-            
-            # Track guide counts for each gene
-            guide_counts = {}
-            
-            for row in reader:
-                if len(row) >= 11 and row[-1]:  # guide_targets column exists
-                    query_id = row[0] if len(row) > 0 else None  # Get query_id
-                    unique_id = row[9]
-                    guide_targets = row[-1]
-                    
-                    # Initialize guide count for this gene
-                    if query_id not in guide_counts:
-                        guide_counts[query_id] = 0
-                    
-                    # Parse guide targets
-                    if guide_targets and guide_targets.strip():
-                        guides = guide_targets.split(',')
-                        for guide in guides:
-                            if guide.strip():
-                                guide_parts = guide.strip().split('/')
-                                if len(guide_parts) == 8:
-                                    strand = guide_parts[7].strip()
-                                    if strand not in ('+', '-'):
-                                        self.logger.warning(
-                                            "Skipping guide target with invalid strand: "
-                                            f"{guide.strip()}"
-                                        )
-                                        continue
 
-                                    cursor.execute("""
-                                        INSERT INTO guide_rnas (
-                                            gene_unique_id, chromosome, start, end,
-                                            sequence, strand
-                                        ) VALUES (?, ?, ?, ?, ?, ?)
-                                    """, (
-                                        unique_id,
-                                        guide_parts[0],
-                                        int(guide_parts[1]) if guide_parts[1].isdigit() else 0,
-                                        int(guide_parts[2]) if guide_parts[2].isdigit() else 0,
-                                        guide_parts[3],
-                                        strand
-                                    ))
-                                    
-                                    # Increment guide count
-                                    guide_counts[query_id] += 1
-            
-            # Update guide counts in genes table
-            for query_id, count in guide_counts.items():
-                if query_id:
-                    cursor.execute("""
-                        UPDATE genes SET guide_count = ? WHERE query_id = ?
-                    """, (count, query_id))
-    
-    def _insert_go_data(self, cursor, results):
-        """Insert GO term data with enhanced information"""
-        
-        kfi_table_path = results['data'].get('go_kfi_table')
-        if not kfi_table_path or not os.path.exists(kfi_table_path):
-            return
-        
-        # Get GO IDs from kfi_table
-        go_ids = []
-        go_data_map = {}
-        
-        with open(kfi_table_path, 'r') as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            
-            for row in reader:
-                if len(row) >= 6:
-                    go_id = row[0]
-                    total_genes = int(row[1]) if row[1] else 0
-                    genes_with_guides = int(row[2]) if row[2] else 0
-                    kfi_score = float(row[4]) if row[4] else 0.0
-                    targetable_type = row[5] if len(row) > 5 else 'Not'
-                    
-                    go_ids.append(go_id)
-                    go_data_map[go_id] = {
-                        'total_genes': total_genes,
-                        'genes_with_guides': genes_with_guides,
-                        'kfi_score': kfi_score,
-                        'targetable_type': targetable_type
-                    }
-        
-        # Fetch GO terms and definitions from API
+    def _load_cached_go_terms(self, db_path, go_ids):
+        """Read reusable GO labels from any previous compatible wide or slim DB."""
+        if not go_ids or not os.path.isfile(db_path):
+            return {}
         try:
-            go_terms_info = self._fetch_go_terms_from_api(go_ids)
-        except Exception as e:
-            self.logger.warning(f"Failed to fetch GO terms from API: {e}")
-            go_terms_info = {}
-        
-        # Parse GO-annotated genes
-        try:
-            go_genes_map = self._parse_go_annotated_genes(results)
-        except Exception as e:
-            self.logger.warning(f"Failed to parse GO-annotated genes: {e}")
-            go_genes_map = {}
-        
-        # Insert data into database
-        for go_id in go_ids:
-            go_info = go_terms_info.get(go_id, {})
-            go_data = go_data_map.get(go_id, {})
-            annotated_genes = go_genes_map.get(go_id, [])
-            
-            # Format annotated genes (first 5 + "...and X more")
-            formatted_genes = self._format_annotated_genes_list(annotated_genes)
-            
-            # Create full genes list for expandable functionality
-            full_genes_list = ", ".join(annotated_genes) if annotated_genes else ""
-            
-            cursor.execute("""
-                INSERT INTO go_terms (
-                    go_id, go_name, go_definition, total_genes, 
-                    genes_with_guides, kfi_score, targetable_type, annotated_genes, annotated_genes_full
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                go_id,
-                go_info.get('name', ''),
-                go_info.get('definition', ''),
-                go_data.get('total_genes', 0),
-                go_data.get('genes_with_guides', 0),
-                go_data.get('kfi_score', 0.0),
-                go_data.get('targetable_type', 'Not'),
-                formatted_genes,
-                full_genes_list
-            ))
+            with sqlite3.connect(db_path) as conn:
+                return self._select_go_terms(conn.cursor(), go_ids)
+        except sqlite3.Error as error:
+            self.logger.warning(f"Cannot reuse the previous GO cache: {error}")
+            return {}
+
+    def _insert_go_data(
+        self,
+        cursor,
+        results,
+        cached_terms=None,
+        go_ids=None,
+        refresh_all=False,
+    ):
+        """Insert only GO identifiers, names, and definitions."""
+        if go_ids is None:
+            go_ids = self._database_go_ids(results)
+        go_terms_info = dict(cached_terms or {})
+        refresh_go_ids = list(go_ids) if refresh_all else [
+            go_id
+            for go_id in go_ids
+            if not self._go_term_has_content(go_terms_info.get(go_id))
+        ]
+        if refresh_go_ids:
+            try:
+                refreshed_terms = (
+                    self._fetch_go_terms_from_api(refresh_go_ids) or {}
+                )
+                for go_id in refresh_go_ids:
+                    refreshed_term = refreshed_terms.get(go_id)
+                    if self._go_term_has_content(refreshed_term):
+                        go_terms_info[go_id] = self._merge_go_term(
+                            go_terms_info.get(go_id),
+                            refreshed_term,
+                        )
+            except Exception as error:
+                self.logger.warning(f"Failed to fetch GO terms from API: {error}")
+
+        cursor.executemany(
+            "INSERT INTO go_terms (go_id, go_name, go_definition) "
+            "VALUES (?, ?, ?)",
+            [
+                (
+                    go_id,
+                    (go_terms_info.get(go_id) or {}).get('name', ''),
+                    (go_terms_info.get(go_id) or {}).get('definition', ''),
+                )
+                for go_id in go_ids
+            ],
+        )
+
+    @staticmethod
+    def _go_term_has_content(go_term):
+        if not isinstance(go_term, dict):
+            return False
+        return bool(
+            str(go_term.get('name') or '').strip()
+            or str(go_term.get('definition') or '').strip()
+        )
+
+    @staticmethod
+    def _merge_go_term(cached_term, refreshed_term):
+        """Merge a refreshed term without erasing useful cached fields."""
+        cached_term = cached_term or {}
+        refreshed_term = refreshed_term or {}
+        return {
+            'name': (
+                refreshed_term.get('name')
+                or cached_term.get('name')
+                or ''
+            ),
+            'definition': (
+                refreshed_term.get('definition')
+                or cached_term.get('definition')
+                or ''
+            ),
+        }
+
+    @staticmethod
+    def _select_go_terms(cursor, go_ids):
+        go_terms_info = {}
+        for offset in range(0, len(go_ids), 500):
+            batch = go_ids[offset:offset + 500]
+            placeholders = ','.join('?' for _ in batch)
+            cursor.execute(
+                "SELECT go_id, go_name, go_definition FROM go_terms "
+                f"WHERE go_id IN ({placeholders})",
+                batch,
+            )
+            for go_id, go_name, go_definition in cursor.fetchall():
+                go_terms_info[go_id] = {
+                    'name': go_name or '',
+                    'definition': go_definition or '',
+                }
+        return go_terms_info
     
     def _fetch_go_terms_from_api(self, go_ids):
         """Fetch GO terms and definitions from QuickGO API"""
@@ -1039,7 +1106,9 @@ class ReportGenerator:
     def _parse_go_annotated_genes(self, results):
         """Parse GO-annotated genes from go_reverse_lookup.tsv"""
         
-        go_reverse_lookup_path = results['data'].get('go_reverse_lookup')
+        go_reverse_lookup_path = self._report_data_path(
+            results, 'go_reverse_lookup'
+        )
         if not go_reverse_lookup_path or not os.path.exists(go_reverse_lookup_path):
             self.logger.warning("go_reverse_lookup.tsv not found")
             return {}
@@ -1092,47 +1161,66 @@ class ReportGenerator:
     
     def _fetch_go_terms_from_database(self, go_ids):
         """Fetch GO terms and definitions from existing database to avoid duplicate API calls"""
-        
+        if not go_ids:
+            return {}
+
         db_path = os.path.join(self.web_data_dir, 'twheel_data.db')
-        
+
         if not os.path.exists(db_path):
             self.logger.warning("Database not found, falling back to API")
             return self._fetch_go_terms_from_api(go_ids)
-        
+
         go_terms_info = {}
-        
+
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Create a placeholder string for the IN clause
-            placeholders = ','.join(['?' for _ in go_ids])
-            
-            cursor.execute(f"""
-                SELECT go_id, go_name, go_definition 
-                FROM go_terms 
-                WHERE go_id IN ({placeholders})
-            """, go_ids)
-            
-            results = cursor.fetchall()
-            
-            for go_id, go_name, go_definition in results:
-                go_terms_info[go_id] = {
-                    'name': go_name or '',
-                    'definition': go_definition or ''
-                }
-            
-            conn.close()
-            
+            with sqlite3.connect(db_path) as conn:
+                go_terms_info = self._select_go_terms(conn.cursor(), go_ids)
+
             self.logger.info(f"Successfully loaded {len(go_terms_info)} GO terms from database")
-            
-            # Check for missing GO terms
-            missing_go_ids = [go_id for go_id in go_ids if go_id not in go_terms_info]
+
+            missing_go_ids = [
+                go_id for go_id in go_ids
+                if not self._go_term_has_content(go_terms_info.get(go_id))
+            ]
             if missing_go_ids:
                 self.logger.info(f"Found {len(missing_go_ids)} GO terms missing from database, fetching from API")
                 try:
-                    missing_go_info = self._fetch_go_terms_from_api(missing_go_ids)
-                    go_terms_info.update(missing_go_info)
+                    missing_go_info = (
+                        self._fetch_go_terms_from_api(missing_go_ids) or {}
+                    )
+                    recovered_terms = {}
+                    for go_id in missing_go_ids:
+                        refreshed_term = missing_go_info.get(go_id)
+                        if self._go_term_has_content(refreshed_term):
+                            recovered_terms[go_id] = self._merge_go_term(
+                                go_terms_info.get(go_id),
+                                refreshed_term,
+                            )
+
+                    go_terms_info.update(recovered_terms)
+                    if recovered_terms:
+                        try:
+                            with sqlite3.connect(db_path) as update_conn:
+                                update_conn.executemany(
+                                    "UPDATE go_terms "
+                                    "SET go_name = ?, go_definition = ? "
+                                    "WHERE go_id = ?",
+                                    [
+                                        (
+                                            term['name'],
+                                            term['definition'],
+                                            go_id,
+                                        )
+                                        for go_id, term
+                                        in recovered_terms.items()
+                                    ],
+                                )
+                                update_conn.commit()
+                        except sqlite3.Error as error:
+                            self.logger.warning(
+                                "Failed to update recovered GO cache values: "
+                                f"{error}"
+                            )
                 except Exception as e:
                     self.logger.warning(f"Failed to fetch missing GO terms from API: {e}")
             
@@ -1168,12 +1256,14 @@ class ReportGenerator:
     def generate_html_report(self, results):
         """Generate HTML report"""
         self.logger.info("Generating HTML report...")
+        if not results.get('_report_sources_staged'):
+            self._stage_report_sources(results)
         
         # Create template files
         self._create_html_template()
         self._create_css_files()
         self._create_js_files()
-        self._copy_static_assets()
+        self._copy_static_assets(results)
         
         # Generate main HTML file
         html_path = os.path.join(self.output_dir, 'report.html')
@@ -1184,42 +1274,42 @@ class ReportGenerator:
         self.logger.info(f"HTML report generated: {html_path}")
         return html_path
     
-    def _copy_static_assets(self):
+    def _copy_static_assets(self, results):
         """Copy static assets like images to output directory"""
         # Create img directory in output folder
         img_dir = os.path.join(self.output_dir, 'static', 'img')
         Path(img_dir).mkdir(parents=True, exist_ok=True)
         
         # Copy logo file if it exists
-        src_logo = os.path.join('src', 'web', 'static', 'img', 'logo.png')
+        src_logo = (
+            Path(__file__).resolve().parents[1]
+            / 'web' / 'static' / 'img' / 'logo.png'
+        )
         dst_logo = os.path.join(img_dir, 'logo.png')
         
-        if os.path.exists(src_logo):
+        if src_logo.exists():
             shutil.copy2(src_logo, dst_logo)
             self.logger.info(f"Logo copied: {src_logo} -> {dst_logo}")
-        
-        # Copy GO-related images from intermediate directory
-        go_images = [
-            'go_parent_counts.png',
-            'treemap_go_parent_counts.png'
-        ]
-        
-        for image_name in go_images:
-            src_image = os.path.join(self.intermediate_dir, image_name)
+
+        go_images = {
+            'go_parent_counts_image': 'go_parent_counts.png',
+            'go_parent_counts_treemap_image': 'treemap_go_parent_counts.png',
+        }
+
+        for source_key, image_name in go_images.items():
+            src_image = self._report_data_path(results, source_key)
             dst_image = os.path.join(img_dir, image_name)
-            
-            if os.path.exists(src_image):
+
+            if src_image and os.path.exists(src_image):
                 shutil.copy2(src_image, dst_image)
                 self.logger.info(f"GO image copied: {src_image} -> {dst_image}")
             else:
-                self.logger.warning(f"GO image not found: {src_image}")
+                if os.path.exists(dst_image):
+                    os.unlink(dst_image)
+                self.logger.warning(f"GO image not found: {image_name}")
     
     def _create_html_template(self):
         """Create HTML template"""
-        template_dir = os.path.join('src', 'web', 'templates')
-        Path(template_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Basic template files will be created later
         pass
     
     def _create_css_files(self):
@@ -4100,7 +4190,7 @@ if (typeof module !== 'undefined' && module.exports) {
             <div class="sidebar-header">
                 <img src="static/img/logo.png" alt="tWhEEL Logo">
                 <p class="subtitle">A pipeline to aggregate results from gene functional analysis, guide RNA design, and gene ontology (GO)-based knock-out feasibility assessment into a single report.</p>
-                <p class="meta">Report generated on {results['timestamp'][:19].replace('T', ' ')} UTC based on data in: intermediate/</p>
+                <p class="meta">Report generated on {results['timestamp'][:19].replace('T', ' ')} UTC from the staged data in: web_data/report_sources/</p>
             </div>
             <nav class="sidebar-nav">
                 <ul>
@@ -4935,7 +5025,7 @@ body {{
 
         <!-- Footer -->
         <div class="footer">
-            <p>tWhEEL Static Report | Generated from intermediate data files</p>
+            <p>tWhEEL Static Report | Generated from staged report source files</p>
         </div>
     </div>
 </body>
@@ -4946,7 +5036,9 @@ body {{
     
     def _load_gene_annotation_data(self, results):
         """Load gene annotation data from TSV file"""
-        annotation_path = results['data'].get('final_annotation_guides')
+        annotation_path = self._report_data_path(
+            results, 'final_annotation_guides'
+        )
         if not annotation_path or not os.path.exists(annotation_path):
             return []
         
@@ -4991,7 +5083,9 @@ body {{
     
     def _load_gene_annotation_data_for_js(self, results):
         """Load gene annotation data for JavaScript embedding"""
-        annotation_path = results['data'].get('final_annotation_guides')
+        annotation_path = self._report_data_path(
+            results, 'final_annotation_guides'
+        )
         if not annotation_path or not os.path.exists(annotation_path):
             return []
         
@@ -5040,7 +5134,9 @@ body {{
     
     def _load_guide_rna_data_for_js(self, results):
         """Load guide RNA data for JavaScript embedding from annotation_with_guides_final.tsv"""
-        annotation_path = results['data'].get('final_annotation_guides')
+        annotation_path = self._report_data_path(
+            results, 'final_annotation_guides'
+        )
         if not annotation_path or not os.path.exists(annotation_path):
             return []
         
@@ -5085,7 +5181,7 @@ body {{
     
     def _load_go_data_for_js(self, results):
         """Load GO analysis data for JavaScript embedding from go_kfi_table.csv with API data"""
-        kfi_table_path = results['data'].get('go_kfi_table')
+        kfi_table_path = self._report_data_path(results, 'go_kfi_table')
         if not kfi_table_path or not os.path.exists(kfi_table_path):
             return []
         
@@ -5164,8 +5260,10 @@ body {{
     
     def _load_go_parent_counts_data_for_js(self, results):
         """Load GO parent counts data for JavaScript embedding from go_parent_counts.csv"""
-        go_parent_counts_path = os.path.join(self.intermediate_dir, 'go_parent_counts.csv')
-        if not os.path.exists(go_parent_counts_path):
+        go_parent_counts_path = self._report_data_path(
+            results, 'go_parent_counts'
+        )
+        if not go_parent_counts_path or not os.path.exists(go_parent_counts_path):
             self.logger.warning(f"GO parent counts file not found: {go_parent_counts_path}")
             return []
         
@@ -5597,7 +5695,7 @@ body {{
 
         <!-- Footer -->
         <div class="footer">
-            <p>tWhEEL Static Report | Generated from intermediate data files</p>
+            <p>tWhEEL Static Report | Generated from staged report source files</p>
         </div>
     </div>
 </body>
@@ -5628,7 +5726,9 @@ body {{
                 results['html_path'] = html_path
             
             # Save results to file
-            results_file = os.path.join(self.intermediate_dir, 'report_generation_results.txt')
+            results_file = os.path.join(
+                self.web_data_dir, 'report_generation_results.txt'
+            )
             with open(results_file, 'w', encoding='utf-8') as f:
                 f.write("=== Report Generation Results ===\n\n")
                 f.write(f"Execution date: {results['timestamp']}\n\n")
@@ -5639,7 +5739,7 @@ body {{
                 if 'html_path' in results:
                     f.write(f"HTML report: {results['html_path']}\n")
                 
-                f.write(f"SQLite database: {results['db_path']}\n")
+                f.write(f"GO cache database: {results['db_path']}\n")
                 f.write(f"JSON summary: {results['json_path']}\n\n")
                 
                 f.write("=== Statistics ===\n")
@@ -5650,6 +5750,7 @@ body {{
                     f.write("\n")
             
             self.logger.info(f"Report generation results saved: {results_file}")
+            results['report_generation_results_path'] = results_file
             self.logger.info("Report generation process completed")
             
             return results

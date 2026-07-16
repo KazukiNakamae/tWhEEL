@@ -22,4 +22,5 @@ __pycache__/
 !src/modules/sgd_annotation.py
 !src/modules/pathway_analysis.py
 !src/modules/pathway_report_generator.py
+!src/modules/report_source_store.py
 !tests/*.py

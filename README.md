@@ -97,8 +97,18 @@ python src/twheel.py --list-steps
 
 ### Data Files
 - **intermediate/** - Intermediate analysis files from each pipeline step
-- **web_data/twheel_data.db** - SQLite database with complete analysis results
+- **web_data/report_sources/** - Durable inputs used to regenerate reports after `intermediate/` is removed
+- **web_data/report_sources/manifest.json** - Inventory of the staged report inputs
+- **web_data/twheel_data.db** - Minimal SQLite cache containing report metadata and GO term labels/definitions
 - **web_data/summary.json** - JSON summary data for programmatic access
+
+Large report inputs remain in their native TSV/CSV/FASTA/BED formats. Each run
+publishes one complete, versioned source snapshot and atomically switches the
+manifest only after every file is ready. tWhEEL uses copy-on-write filesystem
+clones where available and falls back to independent copies, so later writes to
+`intermediate/` cannot damage a published snapshot. Pathway reports stage their
+KFI table, canonical gene mapping, and referenced GPML files in the same source
+store; they do not create a separate SQLite result database.
 
 ### Key Results
 - **annotation_with_guides_final.tsv** - Gene annotations with guide RNAs
