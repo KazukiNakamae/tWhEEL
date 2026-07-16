@@ -14,16 +14,13 @@ output:
 # TransDecoder設定
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
-  min_protein_len: 85
+  min_protein_len: 100
 
 # BUSCO評価設定
 busco:
   docker_image: "ezlabgva/busco:v5.2.2_cv1"
   lineage: "metazoa_odb10"
   cpu: 8
-
-database:
-  force_rebuild: True  # 強制再生成を有効
 
 # FASTA検索設定
 fasta_search:
@@ -53,9 +50,9 @@ report:
   generate_summary: true
   web_port: 5000
 
-# データベース設定
+# Database settings
 database:
-  force_rebuild: false  # 既存データベースを強制的に再作成する場合はtrueに設定
+  force_rebuild: true  # Rebuild the existing report database when enabled
 
 # Docker設定
 docker:

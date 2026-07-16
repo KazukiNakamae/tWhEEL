@@ -16,7 +16,7 @@ output:
 # TransDecoder設定
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
-  min_protein_len: 85
+  min_protein_len: 100
   skip_if_protein_provided: true  # protein_sequencesが指定されている場合、TransDecoderをスキップ
 
 # BUSCO評価設定

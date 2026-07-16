@@ -8,69 +8,141 @@ import sys
 import pandas as pd
 import numpy as np
 import argparse
-from collections import defaultdict
+
+
+def _parse_guide_target_set(guide_targets_str):
+    """Return unique, non-empty guide targets from a serialized field."""
+    if pd.isna(guide_targets_str):
+        return set()
+
+    guide_field = str(guide_targets_str).strip()
+    if not guide_field or guide_field.lower() == 'nan':
+        return set()
+
+    return {
+        guide.strip()
+        for guide in guide_field.split(',')
+        if guide.strip()
+    }
 
 
 def parse_guide_targets(guide_targets_str):
-    """ガイド標的文字列を解析してガイド数を返す"""
-    if pd.isna(guide_targets_str) or guide_targets_str == '':
-        return 0
-    
-    # カンマ区切りでガイド標的を分割
-    guides = guide_targets_str.split(',')
-    return len([g for g in guides if g.strip()])
+    """Return the number of unique guide targets in a serialized field."""
+    return len(_parse_guide_target_set(guide_targets_str))
+
+
+def _require_valid_unique_ids(df):
+    """Require every annotation row to have a usable gene-level identifier."""
+    if 'unique_id' not in df.columns:
+        raise ValueError("Required column 'unique_id' was not found.")
+
+    normalized_ids = df['unique_id'].astype('string').str.strip()
+    invalid_ids = (
+        normalized_ids.isna()
+        | normalized_ids.eq('')
+        | normalized_ids.str.lower().eq('nan')
+    )
+
+    invalid_count = int(invalid_ids.sum())
+    if invalid_count > 0:
+        raise ValueError(
+            f"Found {invalid_count} annotation rows without a valid unique_id."
+        )
+
+
+def _merge_gene_guides(gene_data, guide_targets_str):
+    """Merge guide targets while avoiding large sets for identical repeated rows."""
+    if pd.isna(guide_targets_str):
+        return
+
+    guide_field = str(guide_targets_str).strip()
+    if not guide_field or guide_field.lower() == 'nan':
+        return
+
+    if gene_data['guide_set'] is not None:
+        gene_data['guide_set'].update(_parse_guide_target_set(guide_field))
+    elif gene_data['guide_field'] is None:
+        gene_data['guide_field'] = guide_field
+    elif gene_data['guide_field'] != guide_field:
+        gene_data['guide_set'] = _parse_guide_target_set(
+            gene_data['guide_field']
+        )
+        gene_data['guide_set'].update(_parse_guide_target_set(guide_field))
+        gene_data['guide_field'] = None
+
+
+def _get_gene_guide_count(gene_data):
+    """Return a gene's unique guide count after row-level aggregation."""
+    if gene_data['guide_set'] is not None:
+        return len(gene_data['guide_set'])
+    return parse_guide_targets(gene_data['guide_field'])
 
 
 def calculate_go_kfi(df):
-    """GO-KFIを計算"""
-    
-    # GO termごとの遺伝子情報を集計
-    go_stats = defaultdict(lambda: {
-        'total_genes': 0,
-        'genes_with_guides': 0,
-        'total_guides': 0,
-        'gene_list': []
-    })
-    
-    # GO列を選んで処理 *現状カテゴリごとに分離せず、全てのGOのリストに対してGO-KFIを計算するようにしている。
-    go_columns = ["GO_ALL"]
-    
-    for index, row in df.iterrows():
-        unique_id = row.get('unique_id', '')
-        guide_targets = row.get('guide_targets', '')
-        guide_count = parse_guide_targets(guide_targets)
-        
-        # 各GO列を処理
-        for go_col in go_columns:
-            go_terms_str = row.get(go_col, '')
-            
-            if pd.notna(go_terms_str) and go_terms_str != '':
-                # セミコロン区切りでGO termを分割
-                go_terms = [go.strip() for go in go_terms_str.split(';') if go.strip()]
-                
-                for go_term in go_terms:
-                    go_stats[go_term]['total_genes'] += 1
-                    go_stats[go_term]['total_guides'] += guide_count
-                    go_stats[go_term]['gene_list'].append(unique_id)
-                    
-                    if guide_count > 0:
-                        go_stats[go_term]['genes_with_guides'] += 1
-    
-    # GO-KFIを計算
+    """Calculate GO-KFI using unique_id as the gene-level counting unit."""
+    _require_valid_unique_ids(df)
+
+    genes = {}
+    go_order = []
+    seen_go_terms = set()
+
+    # Aggregate annotation rows into genes before calculating GO statistics.
+    for _, row in df.iterrows():
+        unique_id = str(row['unique_id']).strip()
+        gene_data = genes.setdefault(unique_id, {
+            'go_terms': set(),
+            'guide_field': None,
+            'guide_set': None,
+        })
+
+        _merge_gene_guides(gene_data, row.get('guide_targets', ''))
+
+        go_terms_str = row.get('GO_ALL', '')
+        if pd.isna(go_terms_str) or not str(go_terms_str).strip():
+            continue
+
+        for go_term in str(go_terms_str).split(';'):
+            go_term = go_term.strip()
+            if not go_term:
+                continue
+
+            gene_data['go_terms'].add(go_term)
+            if go_term not in seen_go_terms:
+                seen_go_terms.add(go_term)
+                go_order.append(go_term)
+
+    go_stats = {
+        go_term: {
+            'total_genes': 0,
+            'genes_with_guides': 0,
+            'total_guides': 0,
+        }
+        for go_term in go_order
+    }
+
+    # Add each gene to each associated GO term exactly once.
+    for gene_data in genes.values():
+        guide_count = _get_gene_guide_count(gene_data)
+        for go_term in gene_data['go_terms']:
+            stats = go_stats[go_term]
+            stats['total_genes'] += 1
+            stats['total_guides'] += guide_count
+            if guide_count > 0:
+                stats['genes_with_guides'] += 1
+
     go_kfi_results = []
-    
-    for go_term, stats in go_stats.items():
+
+    for go_term in go_order:
+        stats = go_stats[go_term]
         total_genes = stats['total_genes']
         genes_with_guides = stats['genes_with_guides']
         total_guides = stats['total_guides']
-        
-        # KFIスコアを計算
+
         if total_genes > 0:
             kfi_score = genes_with_guides / total_genes
         else:
             kfi_score = 0.0
-        
-        # ターゲタブル分類
+
         if kfi_score == 1.0:
             targetable_type = 'Fully'
         elif kfi_score > 0.0:
@@ -86,8 +158,16 @@ def calculate_go_kfi(df):
             'kfi_score': kfi_score,
             'targetable_type': targetable_type
         })
-    
-    return pd.DataFrame(go_kfi_results)
+
+    output_columns = [
+        'GO_ID',
+        'total_genes',
+        'genes_with_guides',
+        'total_guides',
+        'kfi_score',
+        'targetable_type',
+    ]
+    return pd.DataFrame(go_kfi_results, columns=output_columns)
 
 
 def generate_statistics(kfi_df):
@@ -137,6 +217,12 @@ def generate_statistics(kfi_df):
 def validate_input_data(df):
     """入力データの検証"""
     print("Validating input data...")
+
+    try:
+        _require_valid_unique_ids(df)
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return False
     
     # GO列の確認
     go_columns = [col for col in df.columns if col.startswith('GO_')]
@@ -208,15 +294,16 @@ def main():
         empty_df.to_csv(args.output, index=False)
         
         # エラー情報を含む統計ファイルを作成
-        error_stats = """[ERROR] GO-KFI calculation failed due to missing GO annotation data.
+        error_stats = """[ERROR] GO-KFI calculation failed because input validation failed.
 
-Root cause: GO annotation retrieval from UniProt failed.
+Root cause: Required GO annotations, guide targets, or unique gene identifiers are missing or invalid.
 
 Recommendations:
 1. Check network connectivity to UniProt REST API
 2. Verify UniProt IDs in subject_id column are valid
-3. Consider using local GO annotation database
-4. Re-run the go_analysis step with proper GO data
+3. Verify every annotation row has a non-empty unique_id
+4. Consider using a local GO annotation database
+5. Re-run the go_analysis step with valid input data
 
 Statistics: 0 GO terms processed (data validation failed)
 """

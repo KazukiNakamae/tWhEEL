@@ -6,12 +6,14 @@ Text summary and HTML interactive report generation
 
 import os
 import json
+import hashlib
 import logging
 import sqlite3
 import csv
 import requests
 import time
 import itertools
+import tempfile
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -21,6 +23,14 @@ csv.field_size_limit(1 << 30)
 
 class ReportGenerator:
     """Report generation processing class"""
+
+    DATABASE_SCHEMA_VERSION = 2
+    DATABASE_SOURCE_KEYS = (
+        'annotation_table',
+        'final_annotation_guides',
+        'go_kfi_table',
+        'go_reverse_lookup',
+    )
     
     def __init__(self, config):
         """
@@ -534,8 +544,43 @@ class ReportGenerator:
         self.logger.info(f"Text summary generated: {summary_path}")
         return summary_path
     
-    def _check_database_exists(self, db_path):
-        """Check if database exists and is valid"""
+    @staticmethod
+    def _hash_file(file_path):
+        """Return a content digest for a database source file."""
+        digest = hashlib.sha256()
+        with open(file_path, 'rb') as source_file:
+            for chunk in iter(lambda: source_file.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _database_input_fingerprint(self, results):
+        """Return a stable fingerprint of every source used to build the DB."""
+        source_state = {}
+        data_files = results.get('data') or {}
+
+        for source_name in self.DATABASE_SOURCE_KEYS:
+            source_path = data_files.get(source_name)
+            if source_path and os.path.isfile(source_path):
+                source_state[source_name] = {
+                    'size': os.path.getsize(source_path),
+                    'sha256': self._hash_file(source_path),
+                }
+            else:
+                source_state[source_name] = None
+
+        payload = {
+            'schema_version': self.DATABASE_SCHEMA_VERSION,
+            'sources': source_state,
+        }
+        serialized = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(',', ':'),
+        ).encode('utf-8')
+        return hashlib.sha256(serialized).hexdigest()
+
+    def _check_database_exists(self, db_path, expected_fingerprint):
+        """Check whether a database is complete and matches current inputs."""
         if not os.path.exists(db_path):
             self.logger.info("Database file does not exist.")
             return False
@@ -546,21 +591,26 @@ class ReportGenerator:
             return False
         
         try:
-            # Try to connect to database
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Check database structure
-            if not self._verify_database_structure(cursor):
-                conn.close()
-                return False
-            
-            # Check if database has data
-            if not self._check_database_data(cursor):
-                conn.close()
-                return False
-            
-            conn.close()
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("PRAGMA query_only = ON")
+                cursor = conn.cursor()
+
+                integrity_result = cursor.execute(
+                    "PRAGMA quick_check"
+                ).fetchone()
+                if not integrity_result or integrity_result[0] != 'ok':
+                    self.logger.warning("Database integrity check failed.")
+                    return False
+
+                if not self._verify_database_structure(cursor):
+                    return False
+
+                if not self._check_database_metadata(
+                    cursor,
+                    expected_fingerprint,
+                ):
+                    return False
+
             self.logger.info(f"An existing valid database was detected.: {db_path}")
             return True
             
@@ -570,7 +620,13 @@ class ReportGenerator:
     
     def _verify_database_structure(self, cursor):
         """Verify that all required tables exist"""
-        required_tables = ['genes', 'guide_rnas', 'go_terms', 'gene_go_relations']
+        required_tables = [
+            'genes',
+            'guide_rnas',
+            'go_terms',
+            'gene_go_relations',
+            'report_metadata',
+        ]
         
         try:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -588,24 +644,26 @@ class ReportGenerator:
         except sqlite3.Error as e:
             self.logger.warning(f"Database structure verification error: {e}")
             return False
-    
-    def _check_database_data(self, cursor):
-        """Check if database contains data"""
+
+    def _check_database_metadata(self, cursor, expected_fingerprint):
+        """Check schema version and source fingerprint stored in the DB."""
         try:
-            # Check if genes table has data
-            cursor.execute("SELECT COUNT(*) FROM genes")
-            gene_count = cursor.fetchone()[0]
-            
-            if gene_count == 0:
-                self.logger.warning("Database tables exist but genes table is empty.")
-                return False
-            
-            self.logger.info(f"The database contains {gene_count} gene data entries.")
-            return True
-            
-        except sqlite3.Error as e:
-            self.logger.warning(f"Database data check error: {e}")
+            cursor.execute(
+                "SELECT key, value FROM report_metadata "
+                "WHERE key IN ('schema_version', 'input_fingerprint')"
+            )
+            metadata = dict(cursor.fetchall())
+        except sqlite3.Error as error:
+            self.logger.warning(f"Database metadata check error: {error}")
             return False
+
+        if metadata.get('schema_version') != str(self.DATABASE_SCHEMA_VERSION):
+            self.logger.info("Database schema version is stale.")
+            return False
+        if metadata.get('input_fingerprint') != expected_fingerprint:
+            self.logger.info("Database source files have changed.")
+            return False
+        return True
 
     def prepare_web_data(self, results):
         """Prepare data for web application in JSON and SQLite formats"""
@@ -616,11 +674,15 @@ class ReportGenerator:
         
         # Create SQLite database
         db_path = os.path.join(self.web_data_dir, 'twheel_data.db')
+        input_fingerprint = self._database_input_fingerprint(results)
         
         # Check for force rebuild flag in config
         force_rebuild = self.config.get('database', {}).get('force_rebuild', False)
         
-        if not force_rebuild and self._check_database_exists(db_path):
+        if not force_rebuild and self._check_database_exists(
+            db_path,
+            input_fingerprint,
+        ):
             self.logger.info("Use an existing database. Skip database creation.")
         else:
             if force_rebuild:
@@ -628,20 +690,7 @@ class ReportGenerator:
             else:
                 self.logger.info("The database does not exist or is invalid. A new one will be created.")
             
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Create tables
-            self._create_database_tables(cursor)
-            
-            # Insert data
-            self._insert_gene_data(cursor, results)
-            self._insert_guide_data(cursor, results)
-            self._insert_go_data(cursor, results)
-            
-            conn.commit()
-            conn.close()
-            
+            self._rebuild_database(db_path, results, input_fingerprint)
             self.logger.info(f"Database creation complete.: {db_path}")
         
         # Save basic statistics in JSON format
@@ -661,9 +710,54 @@ class ReportGenerator:
         
         self.logger.info(f"Web data prepared: {db_path}, {json_path}")
         return db_path, json_path
+
+    def _rebuild_database(self, db_path, results, input_fingerprint):
+        """Build a complete temporary database and atomically publish it."""
+        file_descriptor, temporary_path = tempfile.mkstemp(
+            dir=self.web_data_dir,
+            prefix='.twheel_data.',
+            suffix='.tmp',
+        )
+        os.close(file_descriptor)
+
+        try:
+            with sqlite3.connect(temporary_path) as conn:
+                cursor = conn.cursor()
+                self._create_database_tables(cursor)
+                self._insert_gene_data(cursor, results)
+                self._insert_guide_data(cursor, results)
+                self._insert_go_data(cursor, results)
+                cursor.executemany(
+                    "INSERT INTO report_metadata (key, value) VALUES (?, ?)",
+                    [
+                        ('schema_version', str(self.DATABASE_SCHEMA_VERSION)),
+                        ('input_fingerprint', input_fingerprint),
+                        ('built_at', datetime.now().isoformat()),
+                    ],
+                )
+                conn.commit()
+
+                integrity_result = cursor.execute(
+                    "PRAGMA integrity_check"
+                ).fetchone()
+                if not integrity_result or integrity_result[0] != 'ok':
+                    raise RuntimeError("Rebuilt report database failed integrity check.")
+
+            os.replace(temporary_path, db_path)
+            temporary_path = None
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
     
     def _create_database_tables(self, cursor):
         """Create database tables"""
+
+        cursor.execute("""
+            CREATE TABLE report_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         
         # Gene table
         cursor.execute("""
@@ -781,7 +875,15 @@ class ReportGenerator:
                         for guide in guides:
                             if guide.strip():
                                 guide_parts = guide.strip().split('/')
-                                if len(guide_parts) >= 6:
+                                if len(guide_parts) == 8:
+                                    strand = guide_parts[7].strip()
+                                    if strand not in ('+', '-'):
+                                        self.logger.warning(
+                                            "Skipping guide target with invalid strand: "
+                                            f"{guide.strip()}"
+                                        )
+                                        continue
+
                                     cursor.execute("""
                                         INSERT INTO guide_rnas (
                                             gene_unique_id, chromosome, start, end,
@@ -793,7 +895,7 @@ class ReportGenerator:
                                         int(guide_parts[1]) if guide_parts[1].isdigit() else 0,
                                         int(guide_parts[2]) if guide_parts[2].isdigit() else 0,
                                         guide_parts[3],
-                                        guide_parts[5]
+                                        strand
                                     ))
                                     
                                     # Increment guide count
@@ -970,11 +1072,11 @@ class ReportGenerator:
                             # Split by semicolons and extract gene names
                             gene_entries = genes_string.split(';')
                             for entry in gene_entries:
-                                if '|' in entry:
-                                    # Extract gene name before the first '|'
-                                    gene_name = entry.split('|')[0].strip()
-                                    if gene_name and gene_name not in gene_names:
-                                        gene_names.append(gene_name)
+                                # New files contain only IDs. Keep accepting the legacy
+                                # "unique_id|description|guide_targets" representation.
+                                gene_name = entry.split('|', 1)[0].strip()
+                                if gene_name and gene_name not in gene_names:
+                                    gene_names.append(gene_name)
                         
                         go_genes_map[go_id] = gene_names
                     
@@ -2379,31 +2481,9 @@ class tWhEELReport {
                     return;
                 }
                 
-                // Generate table rows
-                const rows = guideData.map(guide => {
-                    const strandClass = guide.strand === '+' ? 'strand-plus' : 'strand-minus';
-                    const mm0Class = guide.mm0 === 0 ? 'mm-perfect' : 'mm-mismatch';
-                    const mm12Class = guide.mm1_2 === 0 ? 'mm-perfect' : 'mm-mismatch';
-                    
-                    return `
-                        <tr>
-                            <td><span class="query-id">${guide.query_id}</span></td>
-                            <td><span class="reference-id">${guide.reference}</span></td>
-                            <td>${guide.start}</td>
-                            <td>${guide.end}</td>
-                            <td><span class="guide-sequence">${guide.target_sequence}</span></td>
-                            <td><span class="${strandClass}">${guide.strand}</span></td>
-                            <td><span class="${mm0Class}">${guide.mm0}</span></td>
-                            <td><span class="${mm12Class}">${guide.mm1_2}</span></td>
-                            <td>${guide.off_target_score.toFixed(6)}</td>
-                        </tr>
-                    `;
-                }).join('');
-                
-                guideTable.innerHTML = rows;
                 console.log(`Loaded ${guideData.length} guide RNA entries`);
                 
-                // Setup search and filter functionality for guide data
+                // Store all entries, then render only the current page.
                 this.setupGuideTableFilters(guideData);
                 
                 // Mark section as loaded
@@ -4983,7 +5063,7 @@ body {{
                             for target in targets:
                                 if target.strip():
                                     guide_parts = target.strip().split('/')
-                                    if len(guide_parts) >= 8:  # Ensure we have all required fields
+                                    if len(guide_parts) == 8:  # Ensure we have all required fields
                                         guide_data.append({
                                             'query_id': query_id,
                                             'reference': guide_parts[0],
@@ -4995,13 +5075,6 @@ body {{
                                             'off_target_score': float(guide_parts[6]) if guide_parts[6].replace('.', '').isdigit() else 0.0,
                                             'strand': guide_parts[7]
                                         })
-                                        
-                                        # Stop if we reach 1000 guide RNAs
-                                        if len(guide_data) >= 1000:
-                                            break
-                                
-                                if len(guide_data) >= 1000:
-                                    break
                         
         except Exception as e:
             self.logger.error(f"Error loading guide RNA data for JS: {e}")

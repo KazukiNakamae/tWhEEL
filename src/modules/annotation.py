@@ -11,6 +11,9 @@ import re
 from pathlib import Path
 import shutil
 
+from .fasta_search_cache import FastaSearchCache
+from .input_mode import EXISTING_PROTEIN_MODE, determine_protein_input_mode
+
 
 class Annotation:
     """Annotation processing class"""
@@ -85,19 +88,6 @@ class Annotation:
     
     def run_fasta_search(self, query_path, db_path):
         """Execute FASTA search"""
-        # Output file path
-        output_path = os.path.join(self.intermediate_dir, 'ggsearch_results.txt')
-        
-        # Check for existing files
-        if os.path.exists(output_path):
-            # Check the file size to ensure the file is not empty
-            if os.path.getsize(output_path) > 0:
-                self.logger.info(f"Existing FASTA search results found: {output_path}")
-                self.logger.info("Skipping the FASTA search")
-                return output_path
-            else:
-                self.logger.warning(f"The existing FASTA search results file is empty. Rerunning the search: {output_path}")
-        
         self.logger.info("Start the FASTA search against the UniProt database...")
         
         # Run ggsearch36 using intermediate_dir as the working directory
@@ -119,17 +109,24 @@ class Annotation:
         ]
         
         self.logger.debug(f"FASTA search command: {' '.join(cmd)}")
-        
-        # 標準出力をファイルに保存
-        with open(output_path, 'w') as f:
-            result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
-        
-        if result.returncode != 0:
-            self.logger.error(f"FASTA search execution error: {result.stderr}")
-            raise RuntimeError("FASTA search failed")
-        
-        self.logger.info(f"Save the FASTA search results: {output_path}")
-        return output_path
+
+        cache = FastaSearchCache(
+            self.intermediate_dir,
+            namespace='annotation',
+            logger=self.logger,
+        )
+        return cache.run(
+            cmd,
+            query_path,
+            db_path,
+            search_settings={
+                'docker_image': self.config['fasta_search']['docker_image'],
+                'threads': self.config['fasta_search']['threads'],
+                'evalue': self.config['fasta_search']['evalue'],
+                'max_hits': 1,
+                'output_format': 'm10',
+            },
+        )
     
     def parse_fasta_results(self, search_results_path):
         """Parse FASTA search results"""
@@ -149,14 +146,17 @@ class Annotation:
         ggsearch36 -m10 output has two sections per query:
         1. Standard summary section with "The best scores are:" - descriptions are TRUNCATED
            (e.g., "Zinc finger protein 708 OS=H")
-        2. Machine-readable (-m10) alignment section with ">>sp|..." headers - descriptions are FULL
-           (e.g., "Zinc finger protein 708 OS=Homo sapiens OX=9606 GN=ZNF708 PE=1 SV=6")
+        2. Machine-readable (-m10) alignment section with ">>subject_id" headers - descriptions
+           are FULL (e.g., "Zinc finger protein 708 OS=Homo sapiens OX=9606 GN=ZNF708")
 
         This method performs a two-pass parse:
         - Pass 1: Reads the standard "best scores" section to obtain subject_id, length, bits, evalue
           for the best (first) hit per query.
-        - Pass 2: Reads the -m10 alignment header lines (">>sp|...") to obtain the FULL description
-          including the GN= field, then updates the annotations collected in Pass 1.
+        - Pass 2: Reads the -m10 alignment header lines to obtain the FULL description, including
+          the GN= field when available, then updates the annotations collected in Pass 1.
+
+        Subject identifiers are treated as opaque FASTA identifiers. This supports Swiss-Prot
+        (sp|), TrEMBL (tr|), NCBI pipe-delimited identifiers, and custom identifiers.
         """
         annotations = {}  # query_id -> annotation dict
 
@@ -171,8 +171,8 @@ class Annotation:
         # Pass 1: Parse the standard-format section (best scores per query)
         # The query header looks like:
         #   "  1>>>NM_001001130.3.p1 GENE... - 518 aa"
-        # The best-score hit line looks like:
-        #   "sp|P17019|ZN708_HUMAN Zinc finger protein 708 OS=H ( 563) 1854 97.9 0"
+        # A best-score hit line looks like:
+        #   "subject_id Description ( 563) 1854 97.9 0"
         # ------------------------------------------------------------------
         current_query = None
         processing_hits = False
@@ -193,24 +193,26 @@ class Annotation:
                 processing_hits = True
                 continue
 
-            # First hit line in the "best scores" section (truncated description)
-            if processing_hits and current_query and current_query not in annotations and line.startswith('sp|'):
+            # Parse the first hit without assuming a database-specific identifier prefix.
+            if processing_hits and current_query and current_query not in annotations:
                 hit_match = re.match(
-                    r'sp\|([^|]+)\|([^\s]+)\s+(.+?)\s+\(\s*(\d+)\)\s+(\d+)\s+([\d.]+)\s+([\d.e-]+)',
+                    r'^(?P<subject_id>\S+)(?:\s+(?P<description>.*?))?\s+'
+                    r'\(\s*(?P<length>\d+)\)\s+'
+                    r'(?P<raw_score>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+'
+                    r'(?P<bits>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s+'
+                    r'(?P<evalue>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)$',
                     line
                 )
                 if hit_match:
-                    subject_acc  = hit_match.group(1)
-                    subject_name = hit_match.group(2)
-                    description  = hit_match.group(3).strip()   # Truncated; will be replaced in Pass 2
-                    length       = hit_match.group(4)
-                    bits         = hit_match.group(6)
-                    evalue       = hit_match.group(7)
+                    subject_id = hit_match.group('subject_id')
+                    description = (hit_match.group('description') or '').strip()
+                    length = hit_match.group('length')
+                    bits = hit_match.group('bits')
+                    evalue = hit_match.group('evalue')
 
                     annotations[current_query] = {
                         'query_id':   current_query,
-                        'subject_id': f"sp|{subject_acc}|{subject_name}",
-                        'subject_acc': subject_acc,
+                        'subject_id': subject_id,
                         'identity':   '',
                         'length':     length,
                         'evalue':     evalue,
@@ -218,8 +220,8 @@ class Annotation:
                         'description': description,  # Truncated (fallback if Pass 2 fails)
                     }
                     processing_hits = False
-                    self.logger.debug(f"Pass 1 - best hit: {subject_acc} for query {current_query}")
-                else:
+                    self.logger.debug(f"Pass 1 - best hit: {subject_id} for query {current_query}")
+                elif line:
                     self.logger.debug(f"Failed to parse hit line: {line}")
 
             # Stop hit processing when a new query or blank line is encountered
@@ -230,8 +232,8 @@ class Annotation:
         # Pass 2: Parse the -m10 alignment section to obtain full descriptions
         # The -m10 query header looks like:
         #   ">>>NM_001001130.3.p1, 518 aa vs protein_db.fasta library"
-        # The alignment hit header looks like:
-        #   ">>sp|P17019|ZN708_HUMAN Zinc finger protein 708 OS=Homo sapiens OX=9606 GN=ZNF708 PE=1 SV=6"
+        # An alignment hit header looks like:
+        #   ">>subject_id Full description"
         # ------------------------------------------------------------------
         current_m10_query = None
 
@@ -245,25 +247,25 @@ class Annotation:
                 current_m10_query = m10_query_match.group(1).strip()
                 continue
 
-            # -m10 format alignment hit header: ">>sp|ACC|NAME Full description"
-            if current_m10_query and line.startswith('>>sp|'):
-                align_match = re.match(r'^>>sp\|([^|]+)\|([^\s]+)\s+(.+)$', line)
-                if align_match:
-                    hit_acc          = align_match.group(1)
-                    full_description = align_match.group(3).strip()
+            # Parse the first -m10 hit header while excluding query/control headers (">>>").
+            if current_m10_query and line.startswith('>>') and not line.startswith('>>>'):
+                hit_header = line[2:].strip()
+                header_parts = hit_header.split(maxsplit=1)
+                hit_subject_id = header_parts[0] if header_parts else ''
+                full_description = header_parts[1].strip() if len(header_parts) == 2 else ''
 
-                    # Update the annotation only if it matches our best hit for this query
-                    if current_m10_query in annotations:
-                        best = annotations[current_m10_query]
-                        if hit_acc == best['subject_acc']:
-                            best['description'] = full_description
-                            self.logger.debug(
-                                f"Pass 2 - updated description for {current_m10_query}: "
-                                f"{full_description[:60]}"
-                            )
+                # Update the annotation only if it matches the best summary hit for this query.
+                if current_m10_query in annotations:
+                    best = annotations[current_m10_query]
+                    if hit_subject_id == best['subject_id'] and full_description:
+                        best['description'] = full_description
+                        self.logger.debug(
+                            f"Pass 2 - updated description for {current_m10_query}: "
+                            f"{full_description[:60]}"
+                        )
 
-                    # Move on; we only need the first (best) hit per query
-                    current_m10_query = None
+                # Move on; only the first (best) alignment hit is needed per query.
+                current_m10_query = None
 
         # ------------------------------------------------------------------
         # Write results to output file
@@ -570,7 +572,7 @@ class Annotation:
             self._create_individual_multi_gene_files(transcriptome_path, multi_genes)
             
             # Execute alignment process
-            self._run_alignment_process()
+            self._run_alignment_process(multi_genes)
         
         # Extract sequences for Single genes
         if single_genes:
@@ -662,11 +664,9 @@ class Annotation:
         
         When using existing protein sequences, ensure that a mapping file is provided
         """
-        # Determine whether the current mode is existing protein mode
-        protein_sequences = self.config['input'].get('protein_sequences', '')
-        is_existing_protein_mode = bool(protein_sequences and protein_sequences.strip())
-        
-        if is_existing_protein_mode:
+        input_mode = determine_protein_input_mode(self.config)
+
+        if input_mode == EXISTING_PROTEIN_MODE:
             self.logger.info("Existing protein mode detected")
             
             # Check whether the mapping file exists
@@ -714,6 +714,8 @@ class Annotation:
             
         else:
             self.logger.info("Use TransDecoder mode (no mapping file required)")
+
+        return input_mode
     
     def _create_individual_multi_gene_files(self, transcriptome_path, multi_genes):
         """Split multi genes into individual files"""
@@ -759,7 +761,7 @@ class Annotation:
         
         self.logger.info(f"Individual files for Multi genes created successfully: {len(multi_genes)} file")
     
-    def _run_alignment_process(self):
+    def _run_alignment_process(self, expected_multi_ids=None):
         """Execute alignment process"""
         self.logger.info("Start Multi gene alignment...")
         
@@ -767,7 +769,10 @@ class Annotation:
         multi_genes_aligned_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned')
         
         # Create the output directory
-        Path(multi_genes_aligned_dir).mkdir(parents=True, exist_ok=True)
+        aligned_dir_path = Path(multi_genes_aligned_dir)
+        aligned_dir_path.mkdir(parents=True, exist_ok=True)
+        for stale_output in aligned_dir_path.glob('*_aligned_consensus.fa'):
+            stale_output.unlink()
         
         # Building the Docker image
         docker_build_dir = "src/docker/run_alignment_and_mask"
@@ -816,8 +821,34 @@ class Annotation:
         self.logger.info("Multi gene alignment completed successfully")
         
         # Check the number of output files
-        aligned_files = list(Path(multi_genes_aligned_dir).glob("*_aligned_consensus.fa"))
+        aligned_files = sorted(
+            aligned_dir_path.glob("*_aligned_consensus.fa")
+        )
         self.logger.info(f"Number of aligned files generated: {len(aligned_files)}")
+
+        if expected_multi_ids is None:
+            expected_multi_ids = {
+                path.stem for path in Path(multi_genes_dir).glob('*.fa')
+            }
+        expected_multi_ids = set(expected_multi_ids)
+        observed_multi_ids = {
+            path.name[:-len('_aligned_consensus.fa')]
+            for path in aligned_files
+        }
+        missing_multi_ids = sorted(expected_multi_ids - observed_multi_ids)
+        unexpected_multi_ids = sorted(observed_multi_ids - expected_multi_ids)
+        if missing_multi_ids or unexpected_multi_ids:
+            details = []
+            if missing_multi_ids:
+                details.append('missing=' + ','.join(missing_multi_ids))
+            if unexpected_multi_ids:
+                details.append(
+                    'unexpected=' + ','.join(unexpected_multi_ids)
+                )
+            raise RuntimeError(
+                "Multi-gene alignment outputs do not match input groups: "
+                + '; '.join(details)
+            )
     
     def run(self):
         """Execute entire annotation processing"""

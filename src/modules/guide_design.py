@@ -9,6 +9,7 @@ import subprocess
 import logging
 import gzip
 import shutil
+import csv
 from pathlib import Path
 
 
@@ -28,7 +29,7 @@ class GuideDesign:
         
     def prepare_genome_assembly(self):
         """Prepare genome assembly file (using transcriptome as fallback)"""
-        genome_path = self.config['input']['genome_assembly']
+        genome_path = self.config['input'].get('genome_assembly', '')
         
         # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'reference_for_offtarget.fa')
@@ -142,18 +143,158 @@ class GuideDesign:
         else:
             self.logger.info("No degenerate bases were found.")
     
-    def _prepare_multi_genes_aligned(self, aligned_dir):
-        """Integrate multi-gene alignment files"""
+    @staticmethod
+    def _multi_gene_ids_from_fasta(multi_genes_path):
+        """Return exact Multi group IDs represented in a grouped FASTA file."""
+        path = Path(multi_genes_path)
+        if not path.is_file():
+            return set()
+
+        multi_ids = set()
+        with path.open('r', encoding='utf-8') as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.startswith('>'):
+                    continue
+                header_text = line[1:].strip()
+                identifier = (
+                    header_text.split(maxsplit=1)[0] if header_text else ''
+                )
+                identifier_parts = identifier.split('_')
+                if (
+                    len(identifier_parts) < 2
+                    or identifier_parts[0] != 'Multi'
+                    or not identifier_parts[1]
+                ):
+                    raise ValueError(
+                        "Invalid Multi-gene FASTA identifier at "
+                        f"{path}:{line_number}: {identifier!r}"
+                    )
+                multi_ids.add('_'.join(identifier_parts[:2]))
+        return multi_ids
+
+    def _expected_multi_gene_ids(self, multi_genes_path):
+        """Reconcile declared Multi groups with the extracted sequence FASTA."""
+        fasta_multi_ids = self._multi_gene_ids_from_fasta(multi_genes_path)
+        classified_path = Path(self.intermediate_dir) / 'annotation_classified.txt'
+        if not classified_path.is_file():
+            return fasta_multi_ids
+
+        with classified_path.open(
+            'r', encoding='utf-8', newline=''
+        ) as handle:
+            reader = csv.DictReader(handle, delimiter='\t')
+            required_columns = {'classification', 'unique_id'}
+            available_columns = set(reader.fieldnames or [])
+            missing_columns = sorted(required_columns - available_columns)
+            if missing_columns:
+                raise ValueError(
+                    "Annotation classification file is missing required "
+                    "columns: " + ','.join(missing_columns)
+                )
+
+            declared_multi_ids = set()
+            for row_number, row in enumerate(reader, 2):
+                if (row.get('classification') or '').strip() != 'Multi':
+                    continue
+                unique_id = (row.get('unique_id') or '').strip()
+                if not unique_id:
+                    raise ValueError(
+                        "Multi-gene annotation has no unique_id at "
+                        f"{classified_path}:{row_number}"
+                    )
+                declared_multi_ids.add(unique_id)
+
+        missing_multi_ids = sorted(declared_multi_ids - fasta_multi_ids)
+        unexpected_multi_ids = sorted(fasta_multi_ids - declared_multi_ids)
+        if missing_multi_ids or unexpected_multi_ids:
+            details = []
+            if missing_multi_ids:
+                details.append('missing=' + ','.join(missing_multi_ids))
+            if unexpected_multi_ids:
+                details.append(
+                    'unexpected=' + ','.join(unexpected_multi_ids)
+                )
+            raise RuntimeError(
+                "Multi-gene sequence FASTA does not match annotation "
+                "declarations: " + '; '.join(details)
+            )
+
+        return declared_multi_ids
+
+    @staticmethod
+    def _validate_multi_consensus_file(consensus_path, expected_multi_id):
+        """Require one non-empty FASTA record matching its Multi group."""
+        path = Path(consensus_path)
+        record_ids = []
+        sequence_lengths = []
+        current_sequence_length = None
+        with path.open('r', encoding='utf-8') as handle:
+            for line in handle:
+                stripped_line = line.strip()
+                if not stripped_line:
+                    continue
+                if stripped_line.startswith('>'):
+                    if current_sequence_length is not None:
+                        sequence_lengths.append(current_sequence_length)
+                    header_text = stripped_line[1:].strip()
+                    record_ids.append(
+                        header_text.split(maxsplit=1)[0]
+                        if header_text else ''
+                    )
+                    current_sequence_length = 0
+                else:
+                    if current_sequence_length is None:
+                        raise RuntimeError(
+                            f"Invalid aligned consensus FASTA: {path}"
+                        )
+                    current_sequence_length += len(stripped_line)
+        if current_sequence_length is not None:
+            sequence_lengths.append(current_sequence_length)
+
+        if (
+            record_ids != [expected_multi_id]
+            or len(sequence_lengths) != 1
+            or sequence_lengths[0] == 0
+        ):
+            raise RuntimeError(
+                f"Invalid aligned consensus FASTA: {path}"
+            )
+
+    def _prepare_multi_genes_aligned(self, aligned_dir, expected_multi_ids):
+        """Validate and integrate all expected multi-gene consensus files."""
         self.logger.info("Integrating multi-gene alignment files....")
         
         aligned_dir_path = Path(aligned_dir)
         
         # アライメント済みファイルを探す
-        aligned_files = list(aligned_dir_path.glob("*_aligned_consensus.fa"))
-        
+        aligned_files = sorted(
+            aligned_dir_path.glob("*_aligned_consensus.fa")
+        )
+        observed_multi_ids = {
+            aligned_file.name[:-len('_aligned_consensus.fa')]
+            for aligned_file in aligned_files
+        }
+        missing_multi_ids = sorted(
+            set(expected_multi_ids) - observed_multi_ids
+        )
+        unexpected_multi_ids = sorted(
+            observed_multi_ids - set(expected_multi_ids)
+        )
+        if missing_multi_ids or unexpected_multi_ids:
+            details = []
+            if missing_multi_ids:
+                details.append('missing=' + ','.join(missing_multi_ids))
+            if unexpected_multi_ids:
+                details.append('unexpected=' + ','.join(unexpected_multi_ids))
+            raise RuntimeError(
+                "Multi-gene alignment outputs do not match the expected "
+                "groups: " + '; '.join(details)
+            )
         if not aligned_files:
-            self.logger.warning("Aligned files not found.")
-            return None
+            raise RuntimeError(
+                "No aligned consensus files were produced for expected "
+                "Multi-gene groups"
+            )
         
         self.logger.info(f"Number of aligned files found: {len(aligned_files)}")
         
@@ -164,6 +305,8 @@ class GuideDesign:
         # 各ファイルを1行形式に変換
         oneline_files = []
         for aligned_file in aligned_files:
+            multi_id = aligned_file.name[:-len('_aligned_consensus.fa')]
+            self._validate_multi_consensus_file(aligned_file, multi_id)
             # 出力ファイル名
             oneline_filename = aligned_file.name
             oneline_path = os.path.join(oneline_dir, oneline_filename)
@@ -236,18 +379,34 @@ class GuideDesign:
         
         # Multi遺伝子の処理（アライメント済みファイルを統合）
         multi_genes_aligned_dir = os.path.join(self.intermediate_dir, 'multi_genes_aligned')
-        if os.path.exists(multi_genes_aligned_dir):
-            multi_genes_oneline_path = self._prepare_multi_genes_aligned(multi_genes_aligned_dir)
-            if multi_genes_oneline_path:
-                prepared_files['multi_genes'] = multi_genes_oneline_path
-                self.logger.info(f"Prepare a file with multi-gene alignment.: {multi_genes_oneline_path}")
+        multi_genes_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
+        expected_multi_ids = self._expected_multi_gene_ids(multi_genes_path)
+        aligned_dir_path = Path(multi_genes_aligned_dir)
+        aligned_files_exist = bool(list(
+            aligned_dir_path.glob('*_aligned_consensus.fa')
+        )) if aligned_dir_path.is_dir() else False
+
+        if expected_multi_ids:
+            if not aligned_dir_path.is_dir():
+                raise FileNotFoundError(
+                    "Multi-gene alignment directory is missing for expected "
+                    "groups: " + ','.join(sorted(expected_multi_ids))
+                )
+            multi_genes_oneline_path = self._prepare_multi_genes_aligned(
+                multi_genes_aligned_dir, expected_multi_ids
+            )
+            prepared_files['multi_genes'] = multi_genes_oneline_path
+            self.logger.info(
+                "Prepare a file with multi-gene alignment.: "
+                f"{multi_genes_oneline_path}"
+            )
+        elif aligned_files_exist:
+            raise RuntimeError(
+                "Aligned Multi-gene consensus files exist, but no expected "
+                "Multi-gene groups were declared"
+            )
         else:
-            # フォールバック: 従来のmulti_genes.faを使用
-            multi_genes_path = os.path.join(self.intermediate_dir, 'multi_genes.fa')
-            if os.path.exists(multi_genes_path):
-                self._format_fasta_oneline(multi_genes_path)
-                prepared_files['multi_genes'] = multi_genes_path
-                self.logger.info(f"Prepare a multi-gene file (non-aligned).: {multi_genes_path}")
+            self.logger.info("No Multi-gene groups require alignment.")
         
         # Single遺伝子の処理
         single_genes_path = os.path.join(self.intermediate_dir, 'single_genes.fa')
@@ -312,35 +471,47 @@ class GuideDesign:
                 return sum(1 for _ in f)
         except Exception:
             return 0
+
+    @staticmethod
+    def _is_site_specific_target(target_field):
+        """Return whether a CrisFlash target has MM0=1 and MM1-2=0."""
+        parts = target_field.strip().split('/')
+        if len(parts) != 3 or not parts[0]:
+            return False
+
+        try:
+            mm0 = int(parts[1])
+            mm1_2 = int(parts[2])
+        except ValueError:
+            return False
+
+        return mm0 == 1 and mm1_2 == 0
     
     def filter_site_specific_targets(self, bed_path, gene_type):
         """Extract site-specific targets"""
         self.logger.info(f"Extracting site-specific targets for {gene_type}...")
         
-        # 出力ファイルパス
+        # Output file paths
         specific_path = os.path.join(self.intermediate_dir, f'{gene_type}_targets_specific.bed')
         cleaned_path = os.path.join(self.intermediate_dir, f'{gene_type}_targets_specific_clean.bed')
         
-        # Extract site-specific targets（4列目が/1/パターン）
+        # The fourth column uses the format <sequence>/<MM0>/<MM1-2>.
         with open(bed_path, 'r') as f_in:
             with open(specific_path, 'w') as f_out:
                 for line in f_in:
                     fields = line.strip().split('\t')
-                    if len(fields) >= 4:
-                        # 4列目が/1/<数値>パターンかチェック
-                        if '/1/' in fields[3]:
-                            f_out.write(line)
+                    if len(fields) >= 4 and self._is_site_specific_target(fields[3]):
+                        f_out.write(line)
         
-        # 末尾の空白を除去
+        # Remove trailing whitespace from every field.
         with open(specific_path, 'r') as f_in:
             with open(cleaned_path, 'w') as f_out:
                 for line in f_in:
-                    # 各フィールドの末尾空白を除去
                     fields = line.strip().split('\t')
                     cleaned_fields = [field.rstrip() for field in fields]
                     f_out.write('\t'.join(cleaned_fields) + '\n')
         
-        # 統計情報をログ出力
+        # Log the number of retained site-specific targets.
         specific_count = self._count_lines(cleaned_path)
         self.logger.info(f"Number of site-specific targets for {gene_type}: {specific_count}")
         
@@ -388,7 +559,8 @@ class GuideDesign:
                 f_out.write(f"{header}\tguide_targets\n")
                 
                 for line in f_in:
-                    fields = line.strip().split('\t')
+                    annotation_line = line.rstrip('\r\n')
+                    fields = annotation_line.split('\t')
                     if len(fields) >= 10:
                         unique_id = fields[9]  # 10列目がunique_id
                         classification = fields[8]  # 9列目がclassification
@@ -401,7 +573,7 @@ class GuideDesign:
                             guide_targets = targets_map.get(unique_id, [])
                             guide_targets_str = ','.join(guide_targets) if guide_targets else ''
                             
-                            f_out.write(f"{line.strip()}\t{guide_targets_str}\n")
+                            f_out.write(f"{annotation_line}\t{guide_targets_str}\n")
         
         self.logger.info(f"Save the annotation-guide binding results for {gene_type}.: {output_path}")
         return output_path

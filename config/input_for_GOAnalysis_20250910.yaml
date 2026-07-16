@@ -26,7 +26,7 @@ output:
 # TransDecoder設定（既存タンパク質モードでは自動的にスキップされます）
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
-  min_protein_len: 85
+  min_protein_len: 100
   skip_if_protein_provided: true  # 既存タンパク質配列が指定されている場合、TransDecoderをスキップ
 
 # BUSCO評価設定（既存タンパク質配列の品質評価）

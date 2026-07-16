@@ -14,4 +14,12 @@ transcriptome.fa.transdecoder.gff3
 transcriptome.fa.transdecoder.pep
 # others
 busco*
+__pycache__/
 *.py
+!src/docker/run_alignment_and_mask/run_alignment_and_mask.py
+!src/modules/fasta_search_cache.py
+!src/modules/input_mode.py
+!src/modules/sgd_annotation.py
+!src/modules/pathway_analysis.py
+!src/modules/pathway_report_generator.py
+!tests/*.py

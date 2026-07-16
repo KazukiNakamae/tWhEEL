@@ -11,9 +11,13 @@ from pathlib import Path
 import gzip
 import shutil
 
+from .input_mode import EXISTING_PROTEIN_MODE, determine_protein_input_mode
+
 
 class GenePrediction:
     """Gene prediction processing class"""
+
+    TRANSDECODER_DEFAULT_MIN_PROTEIN_LEN = 100
     
     def __init__(self, config):
         """
@@ -28,21 +32,19 @@ class GenePrediction:
         
     def determine_input_mode(self):
         """Determine input mode (TransDecoder or existing protein sequences)"""
-        protein_path = self.config['input'].get('protein_sequences', '')
         transcriptome_path = self.config['input'].get('transcriptome', '')
-        skip_transdecoder = self.config['transdecoder'].get('skip_if_protein_provided', True)
         
         # Transcriptome is always required (tWhEEL is a transcriptome-based pipeline)
         if not transcriptome_path or not os.path.exists(transcriptome_path):
             raise FileNotFoundError("Transcriptome file is required for tWhEEL pipeline")
-        
-        if protein_path and os.path.exists(protein_path) and skip_transdecoder:
+
+        input_mode = determine_protein_input_mode(self.config)
+        if input_mode == EXISTING_PROTEIN_MODE:
             self.logger.info("Existing protein sequences mode - skipping TransDecoder")
             self.logger.info("Transcriptome data will be used in downstream analyses")
-            return "existing_protein"
         else:
             self.logger.info("Standard TransDecoder mode - ORF prediction from transcriptome")
-            return "transdecoder"
+        return input_mode
     
     def prepare_input(self):
         """Prepare input transcriptome file"""
@@ -118,10 +120,42 @@ class GenePrediction:
         # Replace original file
         shutil.move(temp_path, fasta_path)
         self.logger.debug("FASTA file converted to one-line format")
+
+    def _get_transdecoder_min_protein_len(self):
+        """Return a validated TransDecoder minimum protein length."""
+        value = self.config.get('transdecoder', {}).get(
+            'min_protein_len', self.TRANSDECODER_DEFAULT_MIN_PROTEIN_LEN
+        )
+        if isinstance(value, bool):
+            raise ValueError(
+                'transdecoder.min_protein_len must be a positive integer'
+            )
+        if isinstance(value, int):
+            parsed_value = value
+        elif isinstance(value, str):
+            try:
+                parsed_value = int(value.strip())
+            except ValueError as exc:
+                raise ValueError(
+                    'transdecoder.min_protein_len must be a positive integer'
+                ) from exc
+        else:
+            raise ValueError(
+                'transdecoder.min_protein_len must be a positive integer'
+            )
+        if parsed_value <= 0:
+            raise ValueError(
+                'transdecoder.min_protein_len must be a positive integer'
+            )
+        return parsed_value
     
     def run_transdecoder(self, input_path):
         """ORF prediction using TransDecoder"""
         self.logger.info("Begin ORF prediction using TransDecoder...")
+        min_protein_len = self._get_transdecoder_min_protein_len()
+        self.logger.info(
+            f"TransDecoder minimum protein length: {min_protein_len} aa"
+        )
         
         # Create a dedicated working directory for TransDecoder
         transdecoder_workdir = os.path.join(self.intermediate_dir, 'transdecoder_output')
@@ -143,7 +177,8 @@ class GenePrediction:
             "--rm",
             docker_image,
             "TransDecoder.LongOrfs",
-            "-t", input_filename
+            "-t", input_filename,
+            "-m", str(min_protein_len),
         ]
         
         self.logger.debug(f"TransDecoder.LongOrfs実行コマンド: {' '.join(cmd_longorfs)}")

@@ -9,12 +9,39 @@ import csv
 import requests
 import time
 import itertools
+import re
 
 # CSVフィールドサイズ制限を増加
 csv.field_size_limit(1 << 30)
 
 BATCH_SIZE = 100  # バッチサイズ
 APIURL = "https://rest.uniprot.org/uniprotkb/stream"
+GO_ID_PATTERN = re.compile(r'GO:\d{7}')
+
+
+def extract_go_ids(go_field):
+    """Extract unique GO IDs from a UniProt aspect field in source order."""
+    if not go_field:
+        return []
+    return list(dict.fromkeys(GO_ID_PATTERN.findall(go_field)))
+
+
+def classify_go_terms(go_terms_by_aspect):
+    """Normalize GO IDs already classified by UniProt into BP, MF, and CC."""
+    classified = {}
+    all_go_ids = []
+    seen = set()
+
+    for column in ('GO_BP', 'GO_MF', 'GO_CC'):
+        go_ids = list(dict.fromkeys(go_terms_by_aspect.get(column, [])))
+        classified[column] = ';'.join(go_ids)
+        for go_id in go_ids:
+            if go_id not in seen:
+                seen.add(go_id)
+                all_go_ids.append(go_id)
+
+    classified['GO_ALL'] = ';'.join(all_go_ids)
+    return classified
 
 
 def fetch_go_batch(uniprot_ids):
@@ -29,7 +56,7 @@ def fetch_go_batch(uniprot_ids):
     
     params = {
         "query": query,
-        "fields": "accession,go_id",
+        "fields": "accession,go_p,go_f,go_c",
         "format": "tsv"
     }
     
@@ -42,21 +69,27 @@ def fetch_go_batch(uniprot_ids):
         response.raise_for_status()
         
         result = {}
-        for line in response.text.splitlines()[1:]:  # ヘッダーをスキップ
-            if not line.strip():
+        reader = csv.reader(response.text.splitlines(), delimiter='\t')
+        next(reader, None)
+        for row in reader:
+            if not row:
                 continue
-            
-            parts = line.split('\t', 1)
-            if len(parts) >= 2:
-                acc, go_field = parts
-                
-                # GO IDsを抽出
-                go_ids = []
-                if go_field:
-                    for chunk in filter(None, go_field.split("; ")):
-                        go_ids.append(chunk.strip())
-                
-                result[acc] = go_ids
+
+            padded_row = row + [''] * (4 - len(row))
+            accession, go_bp, go_mf, go_cc = padded_row[:4]
+            if not accession:
+                continue
+
+            result[accession] = classify_go_terms({
+                'GO_BP': extract_go_ids(go_bp),
+                'GO_MF': extract_go_ids(go_mf),
+                'GO_CC': extract_go_ids(go_cc),
+            })
+
+        # Cache accessions with no returned annotations to avoid repeated requests.
+        empty_annotation = classify_go_terms({})
+        for accession in uniprot_ids:
+            result.setdefault(accession, empty_annotation.copy())
         
         print(f"  Retrieved GO annotations for {len(result)}/{len(uniprot_ids)} UniProt IDs")
         return result
@@ -64,28 +97,6 @@ def fetch_go_batch(uniprot_ids):
     except requests.exceptions.RequestException as e:
         print(f"  API error: {e}")
         return {}
-
-
-def classify_go_terms(go_ids):
-    """GO IDsを分類別に整理（簡易版）"""
-    # 注意: 実際のGO分類にはOBO/OWLファイルが必要ですが、
-    # ここでは簡易的な処理を行います
-    go_bp = []  # Biological Process
-    go_mf = []  # Molecular Function  
-    go_cc = []  # Cellular Component
-    
-    # 簡易的な分類（実際のプロダクションでは適切なGO分類が必要）
-    for go_id in go_ids:
-        # これは暫定的な処理です
-        # 実際には外部のGO分類データを使用すべきです
-        go_bp.append(go_id)  # 暫定的にすべてBPに分類
-    
-    return {
-        'GO_BP': ';'.join(go_bp) if go_bp else '',
-        'GO_MF': ';'.join(go_mf) if go_mf else '',
-        'GO_CC': ';'.join(go_cc) if go_cc else '',
-        'GO_ALL': ';'.join(go_ids) if go_ids else ''
-    }
 
 
 def extract_uniprot_id(subject_id):
@@ -149,8 +160,8 @@ def main():
                 if new_ids:
                     batch_results = fetch_go_batch(new_ids)
                     # キャッシュに追加
-                    for uid, go_ids in batch_results.items():
-                        go_cache[uid] = classify_go_terms(go_ids)
+                    for uid, go_data in batch_results.items():
+                        go_cache[uid] = go_data
                     
                     # APIリクエスト間隔を調整
                     time.sleep(1)

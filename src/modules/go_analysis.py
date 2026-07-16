@@ -234,7 +234,7 @@ class GOAnalysis:
         
         # DockerでGO親term分析
         cmd = [
-            "docker", "run", "-it", "--rm",
+            "docker", "run", "--rm",
             "-v", f"{os.getcwd()}:/DATA",
             self.config['go_analysis']['count_parent_image'],
             "--go_table", f"/DATA/{fully_targetable_path}",
@@ -308,32 +308,43 @@ class GOAnalysis:
         return stats
     
     def create_go_reverse_lookup(self, go_annotated_path):
-        """GO termから逆引き検索可能なデータ構造を作成"""
+        """Create a compact GO term to unique gene ID reverse lookup."""
         self.logger.info("Creating GO reverse lookup data....")
         
-        # 出力ファイルパス
         output_path = os.path.join(self.intermediate_dir, 'go_reverse_lookup.tsv')
-        
-        # CSVフィールドサイズ制限を増加
-        max_field_size = csv.field_size_limit()
-        try:
-            csv.field_size_limit(1000000)  # 1MBに増加
-        except OverflowError:
-            csv.field_size_limit(max_field_size)  # システムの最大値を使用
-            self.logger.warning(f"Set the CSV field size limit to the maximum value {max_field_size}.")
-        
-        # GOアノテーションファイルを読み込み
+
+        # Only unique IDs are required by the report. Descriptions and guide target
+        # payloads remain in their source tables and must not be duplicated per GO term.
         go_to_genes = {}
         
         try:
             with open(go_annotated_path, 'r', encoding='utf-8') as f:
-                # 手動でTSVを解析（csvモジュールを使わない方法）
-                header_line = f.readline().strip()
+                header_line = f.readline().rstrip('\r\n')
                 header = header_line.split('\t')
-                
-                # GO termの列を特定
-                go_columns = [i for i, col in enumerate(header) if 'GO' in col.upper()]
-                self.logger.debug(f"GO annotation column: {[header[i] for i in go_columns]}")
+                column_indices = {
+                    column.strip().upper(): index
+                    for index, column in enumerate(header)
+                }
+
+                unique_id_index = column_indices.get('UNIQUE_ID')
+                if unique_id_index is None:
+                    raise ValueError("unique_id column not found in GO annotation table")
+
+                go_all_index = column_indices.get('GO_ALL')
+                category_indices = [
+                    column_indices[column]
+                    for column in ('GO_BP', 'GO_MF', 'GO_CC')
+                    if column in column_indices
+                ]
+                if go_all_index is None and not category_indices:
+                    raise ValueError("GO annotation columns not found in GO annotation table")
+
+                selected_columns = (
+                    ['GO_ALL'] if go_all_index is not None else [
+                        header[index] for index in category_indices
+                    ]
+                )
+                self.logger.debug(f"GO annotation columns: {selected_columns}")
                 
                 line_count = 0
                 for line in f:
@@ -342,32 +353,38 @@ class GOAnalysis:
                         self.logger.debug(f"処理済み行数: {line_count}")
                     
                     try:
-                        row = line.strip().split('\t')
-                        
-                        if len(row) > max(go_columns) if go_columns else False:
-                            # 遺伝子情報を取得
-                            gene_info = {
-                                'query_id': row[0] if len(row) > 0 else '',
-                                'subject_id': row[1] if len(row) > 1 else '',
-                                'description': row[6] if len(row) > 6 else '',
-                                'unique_id': row[9] if len(row) > 9 else '',
-                                'guide_targets': row[-1] if len(row) > 10 else ''
-                            }
-                            
-                            # guide_targetsが非常に長い場合は切り詰め
-                            if len(gene_info['guide_targets']) > 50000:
-                                gene_info['guide_targets'] = gene_info['guide_targets'][:50000] + "...[truncated]"
-                            
-                            # 各GO termに対して遺伝子情報を登録
-                            for col_idx in go_columns:
-                                if col_idx < len(row) and row[col_idx]:
-                                    go_terms = row[col_idx].split(';')
-                                    for go_term in go_terms:
-                                        go_term = go_term.strip()
-                                        if go_term:
-                                            if go_term not in go_to_genes:
-                                                go_to_genes[go_term] = []
-                                            go_to_genes[go_term].append(gene_info)
+                        row = line.rstrip('\r\n').split('\t')
+                        if unique_id_index >= len(row):
+                            continue
+
+                        unique_id = row[unique_id_index].strip()
+                        if not unique_id:
+                            continue
+
+                        go_fields = []
+                        if (
+                            go_all_index is not None
+                            and go_all_index < len(row)
+                            and row[go_all_index].strip()
+                        ):
+                            # GO_ALL is the canonical union; do not scan BP/MF/CC again.
+                            go_fields.append(row[go_all_index])
+                        else:
+                            # Support older tables that do not contain a populated GO_ALL.
+                            go_fields.extend(
+                                row[index]
+                                for index in category_indices
+                                if index < len(row) and row[index].strip()
+                            )
+
+                        go_terms = {
+                            go_term.strip()
+                            for field in go_fields
+                            for go_term in field.split(';')
+                            if go_term.strip()
+                        }
+                        for go_term in go_terms:
+                            go_to_genes.setdefault(go_term, set()).add(unique_id)
                     
                     except Exception as e:
                         self.logger.warning(f"Error processing line {line_count}: {e}")
@@ -378,30 +395,21 @@ class GOAnalysis:
         except Exception as e:
             self.logger.error(f"GO annotation file loading error: {e}")
             raise
-        finally:
-            # CSVフィールドサイズ制限を元に戻す
-            csv.field_size_limit(max_field_size)
-        
-        # 逆引きデータをファイルに保存
+
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write("go_term\tgene_count\tgenes\n")
-            
-            for go_term, genes in go_to_genes.items():
+
+            for go_term in sorted(go_to_genes):
+                genes = sorted(go_to_genes[go_term])
                 gene_count = len(genes)
-                gene_list = []
-                
-                for gene in genes:
-                    # 長すぎる場合は切り詰める
-                    description = gene['description'][:500] + "..." if len(gene['description']) > 500 else gene['description']
-                    guide_targets = gene['guide_targets'][:1000] + "..." if len(gene['guide_targets']) > 1000 else gene['guide_targets']
-                    
-                    gene_str = f"{gene['unique_id']}|{description}|{guide_targets}"
-                    gene_list.append(gene_str)
-                
-                f.write(f"{go_term}\t{gene_count}\t{';'.join(gene_list)}\n")
+                f.write(f"{go_term}\t{gene_count}\t{';'.join(genes)}\n")
         
         self.logger.info(f"GO reverse lookup data creation complete.: {output_path}")
         self.logger.info(f"Total number of GO terms: {len(go_to_genes)}")
+        self.logger.info(
+            "Total number of unique GO-gene associations: "
+            f"{sum(len(genes) for genes in go_to_genes.values())}"
+        )
         return output_path
     
     def run(self):

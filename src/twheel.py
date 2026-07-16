@@ -24,6 +24,49 @@ from modules.go_analysis import GOAnalysis
 from modules.pathway_analysis import PathwayAnalysis
 from modules.pathway_report_generator import PathwayReportGenerator
 from modules.report_generator import ReportGenerator
+from modules.input_mode import (
+    EXISTING_PROTEIN_MODE,
+    determine_protein_input_mode,
+    get_configured_protein_path,
+)
+
+
+if hasattr(yaml, 'SafeLoader'):
+    class _UniqueKeySafeLoader(yaml.SafeLoader):
+        """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+    def _construct_unique_mapping(loader, node, deep=False):
+        """Construct a mapping without silently replacing earlier keys."""
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            try:
+                hash(key)
+            except TypeError as error:
+                raise yaml.constructor.ConstructorError(
+                    'while constructing a mapping',
+                    node.start_mark,
+                    'found an unhashable key',
+                    key_node.start_mark,
+                ) from error
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    'while constructing a mapping',
+                    node.start_mark,
+                    f'found duplicate key ({key!r})',
+                    key_node.start_mark,
+                )
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+
+    _UniqueKeySafeLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        _construct_unique_mapping,
+    )
+else:
+    _UniqueKeySafeLoader = None
 
 
 class tWhEELPipeline:
@@ -45,8 +88,10 @@ class tWhEELPipeline:
     def _load_config(self, config_path):
         """Load configuration file"""
         try:
+            if _UniqueKeySafeLoader is None:
+                raise RuntimeError('PyYAML SafeLoader is unavailable')
             with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
+                config = yaml.load(f, Loader=_UniqueKeySafeLoader)
             return config
         except Exception as e:
             print(f"Failed to load configuration file: {e}")
@@ -54,6 +99,17 @@ class tWhEELPipeline:
     
     def create_output_directory(self, analysis_name=None):
         """Create output directory with timestamp and analysis name"""
+        output_config = self.config.get('output')
+        if not isinstance(output_config, dict):
+            raise ValueError("The output configuration must be a mapping")
+        configured_base_dir = output_config.get('base_dir')
+        if (
+            not isinstance(configured_base_dir, str)
+            or not configured_base_dir.strip()
+        ):
+            raise ValueError("output.base_dir must be a non-empty path")
+        output_root = os.path.expanduser(configured_base_dir.strip())
+
         if analysis_name:
             # Check if a complete directory name is provided
             if analysis_name.startswith('tWhEEL_on_'):
@@ -71,10 +127,16 @@ class tWhEELPipeline:
             dir_name = f"tWhEEL_on_{timestamp}"
             print(f"Creating new directory with timestamp only")
         
-        # Update config with new output paths
-        output_dir = os.path.join("outputs", dir_name)
-        self.config['output']['base_dir'] = output_dir
-        self.config['output']['intermediate'] = os.path.join(output_dir, 'intermediate')
+        # Reusing a complete run name must not duplicate the same path segment.
+        normalized_output_root = os.path.normpath(output_root)
+        if os.path.basename(normalized_output_root) == dir_name:
+            output_dir = normalized_output_root
+        else:
+            output_dir = os.path.join(output_root, dir_name)
+        output_config['base_dir'] = output_dir
+        output_config['intermediate'] = os.path.join(
+            output_dir, 'intermediate'
+        )
         
         print(f"Output directory: {output_dir}")
     
@@ -178,9 +240,10 @@ class tWhEELPipeline:
             self.logger.info(f"WikiPathways GPML directory validated: {gpml_dir}")
         
         # Check processing mode: existing protein sequences (optional) + transcriptome (required)
-        protein_sequences = self.config['input'].get('protein_sequences', '')
-        
-        if protein_sequences and os.path.exists(protein_sequences):
+        protein_sequences = get_configured_protein_path(self.config)
+        input_mode = determine_protein_input_mode(self.config)
+
+        if input_mode == EXISTING_PROTEIN_MODE:
             # Existing protein sequences mode - still requires transcriptome for downstream analysis
             self.logger.info("Existing protein sequences mode: Using pre-computed proteins + transcriptome data")
             self.logger.info(f"Protein sequences file: {protein_sequences}")
@@ -192,12 +255,17 @@ class tWhEELPipeline:
             self.logger.info("TransDecoder mode: Using transcriptome for ORF prediction")
             self.logger.info(f"Transcriptome file: {transcriptome}")
             
-            if protein_sequences:
+            if protein_sequences and not os.path.exists(protein_sequences):
                 self.logger.warning(f"Specified protein sequences file not found: {protein_sequences}")
                 self.logger.warning("Falling back to TransDecoder mode")
+            elif protein_sequences:
+                self.logger.info(
+                    "Existing protein sequences were provided, but "
+                    "skip_if_protein_provided is disabled"
+                )
         
         # Optional genome assembly validation
-        genome_assembly = self.config['input']['genome_assembly']
+        genome_assembly = self.config['input'].get('genome_assembly', '')
         if genome_assembly:
             if not os.path.exists(genome_assembly):
                 self.logger.error(f"Genome assembly file not found: {genome_assembly}")
@@ -207,6 +275,53 @@ class tWhEELPipeline:
             self.logger.warning("Genome assembly not provided. Off-target search will use transcriptome (less comprehensive)")
                 
         self.logger.info("Input file validation completed")
+        return True
+
+    def _validate_pathway_analysis_result(self, result):
+        """Validate the pathway-analysis handoff before report generation."""
+        if not isinstance(result, dict):
+            self.logger.error(
+                "Pathway analysis did not return a structured result"
+            )
+            return False
+
+        processed_pathways = result.get('processed_pathways')
+        if not isinstance(processed_pathways, list):
+            self.logger.error(
+                "Pathway analysis result is missing processed_pathways"
+            )
+            return False
+
+        output_files = result.get('output_files')
+        if not isinstance(output_files, dict):
+            self.logger.error(
+                "Pathway analysis result is missing output_files"
+            )
+            return False
+
+        required_artifacts = {
+            'kfi_table_path',
+            'fully_targetable_path',
+            'mapping_path',
+            'gene_match_audit_path',
+            'annotation_identifier_audit_path',
+        }
+        invalid_artifacts = []
+        for artifact_name in sorted(required_artifacts):
+            artifact_path = output_files.get(artifact_name, '')
+            if (
+                not artifact_path
+                or not os.path.isfile(artifact_path)
+                or os.path.getsize(artifact_path) == 0
+            ):
+                invalid_artifacts.append(artifact_name)
+
+        if invalid_artifacts:
+            self.logger.error(
+                "Pathway analysis did not produce required artifacts: "
+                + ', '.join(invalid_artifacts)
+            )
+            return False
         return True
     
     def run_step(self, step_name):
@@ -237,7 +352,14 @@ class tWhEELPipeline:
                 
             elif step_name == "pathway_analysis":
                 pathway_analyzer = PathwayAnalysis(self.config)
-                pathway_analyzer.run()
+                pathway_result = pathway_analyzer.run()
+                if not self._validate_pathway_analysis_result(pathway_result):
+                    return False
+                if not pathway_result['processed_pathways']:
+                    self.logger.warning(
+                        "Pathway analysis completed with 0 reportable pathways; "
+                        "empty report artifacts were created"
+                    )
                 
             elif step_name == "pathway_report_generation":
                 pathway_report_gen = PathwayReportGenerator(self.config)
