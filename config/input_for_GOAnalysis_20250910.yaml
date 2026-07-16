@@ -1,47 +1,47 @@
-# tWhEEL - 既存アミノ酸配列ファイルを使用する設定例
-# このファイルは既にORF予測が完了したアミノ酸配列を直接使用する場合の設定例です
+# Historical local GO configuration using existing protein sequences.
+# LOCAL_DATA is excluded from Git, so replace every input path in a fresh clone.
 
-# 入力ファイル設定
+# Input files
 input:
-  # トランスクリプトームファイル
-  transcriptome: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.cdna.all_simpleheader.fa"  # .fsa_nt, .fa形式対応
+  # Transcriptome input
+  transcriptome: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.cdna.all_simpleheader.fa"
   
-  # 既存のアミノ酸配列ファイル
-  protein_sequences: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.pep.all.fa"  # .fasta, .fa, .pep形式対応
+  # Existing protein sequences
+  protein_sequences: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.pep.all.fa"
   
-  # タンパク質ID→トランスクリプトIDマッピングファイル
-  protein_transcript_mapping: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.62.gff3.tx2protein.tsv"  # タブ区切り形式: protein_id<TAB>transcript_id
+  # Protein-to-transcript mapping input
+  protein_transcript_mapping: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.62.gff3.tx2protein.tsv"  # Headerless TSV: transcript_id<TAB>protein_id
   
-  # GO解析用タンパク質データベース
+  # Protein database used for GO annotation
   protein_db_for_goanalysis: "./LOCAL_DATA/db/uniprot_sprot.fasta"
   
-  # ゲノムアセンブリ
+  # Genome used as the off-target reference
   genome_assembly: "./LOCAL_DATA/20250910_Saccharomyces_cerevisiae_CEN_PK113_7D/Saccharomyces_cerevisiae_cen_pk113_7d_gca_000269885.ASM26988v1.dna_rm.toplevel.fa"
 
-# 出力ディレクトリ設定
+# Output settings
 output:
   base_dir: "outputs"
-  intermediate: "outputs/intermediate"
+  intermediate: "outputs/intermediate"  # Legacy: overwritten with the generated run directory
   
-# TransDecoder設定（既存タンパク質モードでは自動的にスキップされます）
+# TransDecoder settings
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
   min_protein_len: 100
-  skip_if_protein_provided: true  # 既存タンパク質配列が指定されている場合、TransDecoderをスキップ
+  skip_if_protein_provided: true  # Skip TransDecoder when protein_sequences exists
 
-# BUSCO評価設定（既存タンパク質配列の品質評価）
+# BUSCO settings
 busco:
   docker_image: "ezlabgva/busco:v5.2.2_cv1"
-  lineage: "saccharomycetes_odb10"  # 使用する生物のデータベースに応じて変更
+  lineage: "saccharomycetes_odb10"  # Select a lineage suitable for the organism
   cpu: 8
 
-# FASTA検索設定（UniProtに対する機能アノテーション）
+# FASTA search settings
 fasta_search:
   docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
   evalue: 0.1
   threads: 8
 
-# CRISPRガイド設計設定
+# CRISPR guide settings
 crispr:
   docker_image: "kazukinakamae/crisflash:1.2.0"
   pam_pattern: "NGG"
@@ -49,37 +49,37 @@ crispr:
   threads: 10
   memory: "40g"
 
-# GO解析設定
+# GO analysis settings
 go_analysis:
   add_go_image: "kazukinakamae/add-go-columns:v1.0"
   compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.0"
   count_parent_image: "kazukinakamae/count_go_parent_terms:v1.0"
 
-# レポート設定
+# Report settings
 report:
   generate_html: true
   generate_summary: true
-  web_port: 5000
+  web_port: 5000  # Legacy: no server is started and this value is not read
 
-# データベース設定
+# Database settings
 database:
   force_rebuild: false
 
-# Docker設定
+# Legacy Docker settings; these keys are not read by the current runtime
 docker:
   max_memory: "40g"
   use_docker: true
 
-# 実行設定
+# Execution settings
 execution:
   steps:
-    - "gene_prediction"    # BUSCO評価のみ実行（TransDecoder スキップ）
-    - "annotation"         # 機能アノテーション
-    - "guide_design"       # CRISPRガイド設計
-    - "go_analysis"        # GO解析とKFI計算
-    - "report_generation"  # HTMLレポート生成
-  parallel: false
+    - "gene_prediction"
+    - "annotation"
+    - "guide_design"
+    - "go_analysis"
+    - "report_generation"
+  parallel: false  # Legacy: steps always run sequentially
   verbose: true
 
-# 使用例:
-# python src/twheel.py --config config/example_existing_protein.yaml --name existing_protein_analysis
+# Local run example:
+# python src/twheel.py --config config/input_for_GOAnalysis_20250910.yaml --name yeast_go_analysis

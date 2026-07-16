@@ -1,13 +1,16 @@
-# PYENV無効化設定メモ
-# 
-# このプロジェクトではconda環境を使用しています
-# pyenvは無効化してください
-# 
-# 無効化コマンド:
-# unset PYENV_VERSION
-# export PATH=$(echo $PATH | tr ':' '\n' | grep -v pyenv | tr '\n' ':')
+# Local Python environment note
 #
-# conda環境をアクティベート:
-# conda activate twheel_env
+# The installation guide uses a Conda environment named `twheel` with
+# Python 3.12. The environment name is conventional, not an application
+# requirement.
 #
-# 注意: CLINEは今後pyenvを自動的に有効にしないでください
+# If a pyenv override selects a different interpreter, clear it before
+# activating the documented environment:
+#
+#   unset PYENV_VERSION
+#   conda activate twheel
+#
+# Verify the interpreter before installing or running tWhEEL:
+#
+#   python --version
+#   python -c "import yaml; print(yaml.__version__)"

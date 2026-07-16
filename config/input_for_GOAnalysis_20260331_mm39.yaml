@@ -1,68 +1,69 @@
-# tWhEEL - トランスクリプトーム機能解析パイプライン設定ファイル
+# Historical local GO workflow configuration.
+# LOCAL_DATA is excluded from Git, so replace every input path in a fresh clone.
 
-# 入力ファイル設定
+# Input files
 input:
-  transcriptome: "./LOCAL_DATA/20260531_mm39_denovoanalysis/GCF_000001635.27_GRCm39_rna.fa"    # トランスクリプトームファイル (.fsa_nt or .fa)
-  protein_sequences: ""  # 既存のアミノ酸配列ファイル (.fasta/.fa/.pep)
-  protein_transcript_mapping: ""  # タンパク質ID→トランスクリプトIDマッピングファイル (.tsv) 
-  genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa)
-  protein_db_for_goanalysis: "./LOCAL_DATA/db/uniprot_sprot.fasta"       # GO解析用タンパク質データベースファイル (.fasta)
+  transcriptome: "./LOCAL_DATA/20260531_mm39_denovoanalysis/GCF_000001635.27_GRCm39_rna.fa"
+  protein_sequences: ""  # Optional existing protein sequences
+  protein_transcript_mapping: ""  # Headerless TSV: transcript_id<TAB>protein_id
+  genome_assembly: ""  # Optional; the transcriptome is used as the off-target reference when blank
+  protein_db_for_goanalysis: "./LOCAL_DATA/db/uniprot_sprot.fasta"
 
-# 出力ディレクトリ設定
+# Output settings
 output:
   base_dir: "outputs"
-  intermediate: "outputs/intermediate"
+  intermediate: "outputs/intermediate"  # Legacy: overwritten with the generated run directory
   
-# TransDecoder設定
+# TransDecoder settings
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
   min_protein_len: 100
-  skip_if_protein_provided: true  # protein_sequencesが指定されている場合、TransDecoderをスキップ
+  skip_if_protein_provided: true  # Skip TransDecoder when protein_sequences exists
 
-# BUSCO評価設定
+# BUSCO settings
 busco:
   docker_image: "ezlabgva/busco:v5.2.2_cv1"
   lineage: "metazoa_odb10"
   cpu: 8
 
-# FASTA検索設定
+# FASTA search settings
 fasta_search:
   docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
   evalue: 0.1
   threads: 8
 
-# CRISPRガイド設計設定
+# CRISPR guide settings
 crispr:
   docker_image: "kazukinakamae/crisflash:1.2.0"
   pam_pattern: "NGG"
   max_mismatch: 2
   threads: 10
   memory: "40g"
-  # 注意: genome_assemblyが指定されていない場合、オフターゲット検索にtranscriptomeを使用します
-  # この場合、ゲノム全体をカバーしないため、オフターゲット検索の精度が低下する可能性があります
+  # A blank genome_assembly uses the transcriptome as the off-target reference.
+  # This does not cover genomic sequence absent from the transcriptome.
 
-# GO解析設定
+# GO analysis settings
 go_analysis:
   add_go_image: "kazukinakamae/add-go-columns:v1.0"
   compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.0"
   count_parent_image: "kazukinakamae/count_go_parent_terms:v1.0"
 
-# レポート設定
+# Report settings
 report:
   generate_html: true
   generate_summary: true
-  web_port: 5000
+  web_port: 5000  # Legacy: no server is started and this value is not read
 
-# データベース設定
+# Database settings
 database:
-  force_rebuild: false  # 既存データベースを強制的に再作成する場合はtrueに設定
+  force_rebuild: false  # Rebuild the existing report database when enabled
 
-# Docker設定
+# Legacy Docker settings; these keys are not read by the current runtime
 docker:
   max_memory: "40g"
   use_docker: true
 
-# 実行設定
+# Execution settings
 execution:
   steps:
     - "gene_prediction"
@@ -70,5 +71,5 @@ execution:
     - "guide_design"
     - "go_analysis"
     - "report_generation"
-  parallel: false
+  parallel: false  # Legacy: steps always run sequentially
   verbose: true

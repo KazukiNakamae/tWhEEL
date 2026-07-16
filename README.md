@@ -1,295 +1,418 @@
-# tWhEEL - Transcriptome Workflow for Hierarchical Exploration and Expression Levels
+# tWhEEL
 
-A comprehensive bioinformatics pipeline for transcriptome functional analysis and CRISPR target identification. tWhEEL integrates gene prediction, functional annotation, guide RNA design, and Gene Ontology analysis to systematically identify genes for CRISPR-based knockout experiments.
+**Transcriptome Workflow for Hierarchical Exploration and Expression Levels**
 
-## Quick Start
+tWhEEL is a Docker-oriented transcriptome analysis pipeline for protein
+prediction, similarity-based annotation, SpCas9 guide design, and knockout
+feasibility assessment. The current implementation has two report workflows:
 
-### 1. Installation
+```text
+GO workflow
+Transcriptome -> Gene prediction -> Protein annotation -> Guide design
+              -> GO analysis -> GO report
+
+Pathway workflow
+Transcriptome -> Gene prediction -> SGD annotation -> Guide design
+              -> Pathway analysis -> Pathway report
+```
+
+The pathway workflow is currently centered on *Saccharomyces cerevisiae*
+because its annotation step uses an SGD reference database. Run the GO and
+pathway workflows in separate output directories: `annotation` and
+`sgd_annotation` intentionally write the same intermediate filenames.
+
+## Requirements
+
+- Linux or macOS
+- Python 3.12 (the currently used and documented environment)
+- A running Docker daemon and the Docker CLI
+- Network access when images, BUSCO data, GO ontology files, or UniProt/QuickGO
+  records are not already cached
+- RAM and storage appropriate for the input data and selected Docker images
+
+The current annotation implementations invoke `sudo docker build` for the
+local multi-gene alignment image. GO analysis also invokes `sudo docker build`
+when one of its three configured helper images is missing. The user running
+tWhEEL must therefore be able to execute those commands in the local Docker
+setup.
+
+## Installation
 
 ```bash
-# Clone repository
 git clone https://github.com/KazukiNakamae/tWhEEL.git
 cd tWhEEL
 
-# Create conda environment
 conda create -n twheel python=3.12 -y
 conda activate twheel
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Build Docker images
-docker build -t kazukinakamae/add-go-columns:v1.0 src/docker/add_go_columns/
-docker build -t kazukinakamae/compute_go_kfi:v1.0 src/docker/compute_go_kfi/
-docker build -t kazukinakamae/count_go_parent_terms:v1.0 src/docker/count_go_parent_terms/
-docker build -t kazukinakamae/run_alignment_and_mask:v1.0 src/docker/run_alignment_and_mask/
 ```
 
-### 2. Prepare Configuration
+The GO helper images may be built before the first run:
 
 ```bash
-# Copy and edit configuration file
+docker build -t kazukinakamae/add-go-columns:v1.0 \
+  src/docker/add_go_columns/
+docker build -t kazukinakamae/compute_go_kfi:v1.0 \
+  src/docker/compute_go_kfi/
+docker build -t kazukinakamae/count_go_parent_terms:v1.0 \
+  src/docker/count_go_parent_terms/
+```
+
+Multi-gene alignment uses the local tag below. The current annotation code
+rebuilds it during each applicable annotation run even if it already exists.
+
+```bash
+docker build -t run_alignment_and_mask/v1.0 \
+  src/docker/run_alignment_and_mask/
+```
+
+Other configured images (TransDecoder, BUSCO, SeqKit, FASTA3, and CrisFlash)
+are pulled by Docker on first use if they are not available locally.
+
+Run commands from the repository root. Several Docker build contexts and
+mounted paths are resolved relative to the current working directory.
+
+## Quick start: GO workflow
+
+Copy the standard template and edit the paths before running it. The unedited
+`config/default.yaml` cannot run because its required input paths are empty.
+
+```bash
 cp config/default.yaml config/my_analysis.yaml
-
-# Edit config file with your input files and parameters
-# Required: transcriptome and uniprot_db
 ```
 
-### 3. Run Pipeline
+At minimum, set:
+
+```yaml
+input:
+  transcriptome: "/absolute/path/to/transcriptome.fasta"
+  protein_db_for_goanalysis: "/absolute/path/to/uniprot_sprot.fasta"
+
+output:
+  base_dir: "outputs"
+```
+
+Then run the steps listed in `execution.steps`:
 
 ```bash
-# Run complete pipeline
+python src/twheel.py \
+  --config config/my_analysis.yaml \
+  --name my_analysis
+```
+
+This creates a directory such as
+`outputs/tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis/`.
+
+### Protein database requirement
+
+`protein_db_for_goanalysis` is the implemented key; `uniprot_db` is not read by
+the pipeline. The annotation parser accepts opaque/custom FASTA identifiers,
+but the GO helper extracts a UniProtKB accession from each best-hit
+`subject_id` and queries the UniProt REST API. A complete GO workflow therefore
+requires best-hit identifiers that UniProt can resolve. A custom database with
+unresolvable identifiers may be usable for annotation alone but will not
+produce usable GO annotations.
+
+## Existing protein mode
+
+Provide a protein FASTA and enable `skip_if_protein_provided` to skip
+TransDecoder. The transcriptome is still required for sequence extraction and
+guide design.
+
+```yaml
+input:
+  transcriptome: "/absolute/path/to/transcripts.fasta"
+  protein_sequences: "/absolute/path/to/proteins.fasta"
+  protein_transcript_mapping: "/absolute/path/to/mapping.tsv"
+  protein_db_for_goanalysis: "/absolute/path/to/uniprot_sprot.fasta"
+
+transdecoder:
+  skip_if_protein_provided: true
+```
+
+The mapping file is a headerless TSV. Lines beginning with `#` and blank lines
+are ignored; extra columns are ignored.
+
+```text
+transcript_id<TAB>protein_id
+```
+
+The first two columns are read in that order, and the implementation constructs
+a `protein_id -> transcript_id` lookup. A normal, non-comment header row is
+treated as data and should not be used.
+
+Existing protein mode is selected only when the configured protein file exists
+and `skip_if_protein_provided` is true (the option defaults to true when
+omitted). Otherwise, the pipeline uses TransDecoder mode. See
+`config/example_existing_protein.yaml` for a complete template.
+
+## Pathway workflow
+
+The pathway workflow replaces `annotation` with `sgd_annotation` and requires a
+local WikiPathways GPML directory. A minimal configuration outline is:
+
+```yaml
+input:
+  transcriptome: "/absolute/path/to/transcripts.fasta"
+  protein_sequences: "/absolute/path/to/proteins.fasta"
+  protein_transcript_mapping: "/absolute/path/to/mapping.tsv"
+  sgd_db: "/absolute/path/to/sgd_reference.fasta"
+  genome_assembly: "/absolute/path/to/genome.fasta"  # optional
+
+pathway_analysis:
+  wikipathways_gpml_dir: "/absolute/path/to/gpml_directory"
+  target_gene_databases:
+    - database_name: "SGD"
+      id_pattern: "^S\\d{9}$"
+      annotation_key: "sgd_id"
+    - database_name: "Ensembl"
+      id_pattern: "^Y[A-Z]{2}\\d{3}[CW]$"
+      annotation_key: "ensembl_id"
+  minimum_pathway_coverage: 0.5
+  skip_low_coverage_pathways: true
+
+pathway_report:
+  output_name: "pathway_report.html"
+
+execution:
+  steps:
+    - gene_prediction
+    - sgd_annotation
+    - guide_design
+    - pathway_analysis
+    - pathway_report_generation
+  verbose: true
+```
+
+`database_name` must match the GPML `Xref` database name exactly, and
+`id_pattern` is applied as a full regular-expression match. The dated pathway
+configuration in `config/input_for_PathwayAnalysis_20250917.yaml` is a local
+run record: it references `LOCAL_DATA`, which is excluded from Git and is not
+available in a fresh clone.
+
+## Command-line usage
+
+```bash
+python src/twheel.py --help
 python src/twheel.py --config config/my_analysis.yaml --name my_analysis
-
-# Run specific step
-python src/twheel.py --config config/my_analysis.yaml --step annotation
-```
-
-## Pipeline Overview
-
-```
-Transcriptome → Gene Prediction → Annotation → Guide Design → GO Analysis → Report
-```
-
-### Core Components
-
-| Component | Function | Output |
-|-----------|----------|--------|
-| **Gene Prediction** | ORF prediction using TransDecoder | Protein sequences |
-| **Annotation** | Functional annotation via FASTA search | Gene classifications, annotations |
-| **Guide Design** | CRISPR guide RNA design using CRISPRFlash | Guide sequences with specificity scores |
-| **GO Analysis** | Gene Ontology mapping and KFI calculation | GO-KFI scores, targetability classification |
-| **Report Generation** | Interactive HTML dashboard with data visualization | Comprehensive analysis report |
-
-## Usage Examples
-
-### Basic Analysis
-```bash
-python src/twheel.py --config config/default.yaml
-```
-
-### Use Existing Protein Sequences
-```yaml
-# config/protein_mode.yaml
-input:
-  transcriptome: "/path/to/transcriptome.fasta"
-  protein_sequences: "/path/to/proteins.fasta"
-  uniprot_db: "/path/to/uniprot_db.fasta"
-```
-
-### Resume Previous Analysis
-```bash
 python src/twheel.py --config config/my_analysis.yaml \
-  --name tWhEEL_on_20250918_120000_my_analysis
+  --step annotation \
+  --name tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis
 ```
 
-### List Available Steps
+Supplying a simple `--name` creates a new timestamped run. Supplying a complete
+name beginning with `tWhEEL_on_` reuses that run directory. Reuse is not an
+automatic resume mechanism: tWhEEL does not detect completed steps. Without
+`--step`, every configured step runs again in order. A single-step run must
+reuse the correct directory and its prerequisite intermediate files.
+
+The implemented step names and their main contracts are:
+
+| Step | Main prerequisite | Main output |
+| --- | --- | --- |
+| `gene_prediction` | Transcriptome; optional existing proteins | `query.pep`, BUSCO output |
+| `annotation` | `query.pep`, transcriptome, GO protein DB | `annotation_classified.txt` |
+| `sgd_annotation` | `query.pep`, transcriptome, SGD DB | `annotation_classified.txt` |
+| `guide_design` | Classified Single/Multi sequences | `annotation_with_guides_final.tsv` |
+| `go_analysis` | Final annotation/guide table | GO-KFI tables and GO lookup files |
+| `pathway_analysis` | Final annotation/guide table and GPML files | PW-KFI, mappings, and audit tables |
+| `report_generation` | GO workflow artifacts | `report.html`, optional `summary.txt` |
+| `pathway_report_generation` | Canonical pathway table and mapping | Configured pathway HTML report |
+
+`--step` dispatches all eight names above. The current `--list-steps` output is
+legacy CLI metadata and lists only the five standard GO-workflow steps. The
+current `--version` output is also a legacy `1.0.0` string and is not synchronized
+with the latest Git tag or commits.
+
+## Input behavior
+
+- `input.transcriptome` is required for a full pipeline run in both protein
+  input modes.
+- Transcriptome, protein, genome, and annotation database inputs may be plain
+  FASTA or gzip-compressed FASTA; format handling is based on a `.gz` suffix.
+- The implementation does not validate a fixed FASTA extension or an ACGTN-only
+  alphabet. During off-target reference preparation, supported IUPAC degenerate
+  bases are converted to `N` for CrisFlash compatibility.
+- `input.genome_assembly` is optional. When absent, guide design uses the
+  transcriptome as its off-target reference and logs that this is less
+  comprehensive.
+- YAML duplicate keys are rejected rather than silently overwritten.
+
+## Configuration behavior
+
+`config/default.yaml` covers the GO workflow.
+`config/input_for_PathwayAnalysis_20250917.yaml` shows the additional pathway
+sections, but its input paths are local and must be replaced.
+
+The following current behaviors are easy to miss:
+
+- `output.base_dir` is the output root. At startup, the pipeline replaces
+  `output.intermediate` with `<run>/intermediate`; the YAML value is not an
+  independent output location.
+- Steps always run sequentially. `execution.parallel` is currently not read.
+- `report.generate_html` and `report.generate_summary` control standard report
+  outputs.
+- `pathway_report.output_name` controls the pathway HTML filename.
+- `report.web_port`, `pathway_report.web_port`,
+  `pathway_report.generate_html`, `docker.max_memory`, and
+  `docker.use_docker` are retained in older configurations but are not read by
+  the current Python implementation.
+- `database.force_rebuild` controls rebuilding the minimal GO metadata cache.
+
+## Output layout
+
+Depending on the selected workflow and report settings, a run has this shape:
+
+```text
+<output.base_dir>/tWhEEL_on_<timestamp>[_<name>]/
+├── twheel.log
+├── intermediate/
+│   ├── transcriptome.fa
+│   ├── query.pep
+│   ├── annotation_classified.txt
+│   ├── annotation_with_guides_final.tsv
+│   ├── go_kfi_table.csv                         # GO workflow
+│   ├── pathway_kfi_table.csv                    # pathway workflow
+│   ├── pathway_gene_mapping.tsv                 # pathway workflow
+│   ├── pathway_gene_match_audit.tsv             # pathway workflow
+│   └── pathway_annotation_identifier_audit.tsv  # pathway workflow
+├── report.html                    # standard report when enabled
+├── summary.txt                    # standard text summary when enabled
+├── pathway_report.html            # default pathway report name
+├── static/                        # CSS, JavaScript, logo, report images
+└── web_data/
+    ├── summary.json               # GO workflow
+    ├── pathway_summary.json       # pathway workflow
+    ├── twheel_data.db             # GO label/definition cache only
+    ├── report_generation_results.txt
+    └── report_sources/
+        ├── manifest.json
+        └── snapshots/
+```
+
+Most analysis results remain native TSV, CSV, FASTA, BED, text, or GPML files;
+they are not copied into a result database. `web_data/twheel_data.db` contains
+only report metadata and cached GO term labels/definitions. The pathway report
+does not create a separate SQLite result database.
+
+Report generators atomically publish versioned, checksum-verified snapshots of
+the report inputs available to them. The standard report snapshot may contain
+only the files present in that run; the pathway report requires a complete
+canonical KFI-table/mapping pair. The generator classes can fall back to the
+published snapshot when their configured `intermediate` directory does not
+exist. The public CLI currently recreates `intermediate` during initialization,
+so this fallback is an internal generator contract, not a CLI backup/restore
+procedure.
+
+The HTML files are static reports. Keep the adjacent `static/` directory with
+the HTML file when moving a report.
+
+## Result semantics
+
+### Single and Multi classifications
+
+- **Single**: exactly one query sequence has a given best-hit `subject_id`.
+- **Multi**: two or more query sequences share that best-hit `subject_id`.
+
+These are similarity-hit groups, not an independent proof of biological gene or
+transcript redundancy. Each group receives a generated `unique_id`, which is
+the gene-level counting unit used by GO-KFI.
+
+### Site-specific guides
+
+CrisFlash serializes the guide sequence and mismatch counts in the fourth BED
+field as `<sequence>/<MM0>/<MM1-2>`. The current filter retains a guide only when
+`MM0 == 1` and `MM1-2 == 0`. Any additional score is passed through from
+CrisFlash; tWhEEL does not enforce a documented 0-1 range.
+
+### GO-KFI
+
+For each GO term, annotation rows are first collapsed by `unique_id`, guide
+targets are de-duplicated, and each gene is counted once:
+
+```text
+GO-KFI = unique genes with at least one retained guide
+         / unique genes annotated to the GO term
+```
+
+Scores are classified as Fully (`1.0`), Partially (`0 < score < 1.0`), or Not
+targetable (`0.0`).
+
+### PW-KFI
+
+Pathway gene nodes are filtered by configured database/identifier contracts and
+collapsed to exact canonical gene units. Non-evaluable nodes are excluded from
+the denominator; exact canonical matched and unmatched units are included:
+
+```text
+PW-KFI = canonical pathway genes with at least one retained guide
+         / evaluable canonical pathway genes
+```
+
+Pathways with unresolved cross-database canonical identity are skipped. Low
+annotation coverage is either reported or skipped according to
+`minimum_pathway_coverage` and `skip_low_coverage_pathways`. The two pathway
+audit TSV files record matching, exclusion, and identifier issues.
+
+## Testing
+
+With the development dependencies from `requirements.txt` installed:
+
 ```bash
-python src/twheel.py --list-steps
+python -m pytest -q
 ```
 
-## Output Files
-
-### Generated Reports
-- **report.html** - Interactive web dashboard with tables, charts, and data export
-- **summary.txt** - Text summary of analysis results
-- **twheel.log** - Detailed execution log
-
-### Data Files
-- **intermediate/** - Intermediate analysis files from each pipeline step
-- **web_data/report_sources/** - Durable inputs used to regenerate reports after `intermediate/` is removed
-- **web_data/report_sources/manifest.json** - Inventory of the staged report inputs
-- **web_data/twheel_data.db** - Minimal SQLite cache containing report metadata and GO term labels/definitions
-- **web_data/summary.json** - JSON summary data for programmatic access
-
-Large report inputs remain in their native TSV/CSV/FASTA/BED formats. Each run
-publishes one complete, versioned source snapshot and atomically switches the
-manifest only after every file is ready. tWhEEL uses copy-on-write filesystem
-clones where available and falls back to independent copies, so later writes to
-`intermediate/` cannot damage a published snapshot. Pathway reports stage their
-KFI table, canonical gene mapping, and referenced GPML files in the same source
-store; they do not create a separate SQLite result database.
-
-### Key Results
-- **annotation_with_guides_final.tsv** - Gene annotations with guide RNAs
-- **go_kfi_table.csv** - GO Knock-out Feasibility Index scores
-- **pathway_kfi_table.csv** - Pathway-level targetability assessment
-
-## Configuration
-
-### Required Parameters
-```yaml
-input:
-  transcriptome: "path/to/transcriptome.fasta"  # Always required
-```
-
-### Conditional Parameters
-```yaml
-input:
-  # For Gene Prediction, Annotation, Guide Design, GO Analysis:
-  uniprot_db: "path/to/protein_database.fasta"  # Required for these steps
-  
-  # For Pathway Analysis only (alternative to uniprot_db):
-  sgd_db: "path/to/sgd_reference.fasta"         # Used for pathway analysis
-```
-
-### Optional Parameters
-```yaml
-input:
-  protein_sequences: "path/to/proteins.fasta"   # Skip TransDecoder
-  genome_assembly: "path/to/genome.fasta"       # Better off-target analysis
-  protein_transcript_mapping: "path/to/mapping.tsv"  # Required with protein_sequences
-```
-
-### Database Parameter Details
-- **uniprot_db**: Any protein database (FASTA format)
-  - Not limited to UniProt - can be custom databases
-  - Required for: annotation, GO analysis
-  - NOT used in: pathway analysis (uses sgd_db instead)
-  - Examples: UniProt Swiss-Prot, TrEMBL, or custom organism-specific databases
-- **sgd_db**: SGD (Saccharomyces Genome Database) reference
-  - Required only for pathway analysis
-  - Currently yeast-specific (S. cerevisiae)
-
-### Resource Configuration
-```yaml
-crispr:
-  memory: "40g"        # For large transcriptomes
-  threads: 10
-
-busco:
-  cpu: 8
-
-fasta_search:
-  threads: 8
-```
-
-See `config/default.yaml` for all available options.
-
-## Performance Tuning
-
-### For Large Datasets (>100k transcripts)
-```yaml
-crispr:
-  memory: "60g"
-  threads: 20
-busco:
-  cpu: 16
-fasta_search:
-  threads: 16
-```
-
-### For Memory-Constrained Systems (16GB RAM)
-```yaml
-crispr:
-  memory: "12g"
-  threads: 6
-busco:
-  cpu: 4
-fasta_search:
-  threads: 4
-```
-
-## Understanding Results
-
-### GO-KFI Score
-The Gene Ontology Knock-out Feasibility Index (GO-KFI) quantifies the proportion of genes in each GO term that have targetable guide RNAs:
-- **1.0 (Fully targetable)** - All genes have guide RNAs
-- **0.5 (Partially targetable)** - Half of genes have guide RNAs
-- **0.0 (Not targetable)** - No genes have guide RNAs
-
-### Guide RNA Specificity
-- **MM0 = 1, MM1-2 = 0** - Highly specific (recommended)
-- **MM0 > 1** - Non-specific guides
-- **Off-target score** - Quantitative specificity (0-1 scale)
-
-### Gene Classification
-- **Single** - Non-redundant genes (unique annotation)
-- **Multi** - Redundant genes (multiple transcripts per gene)
+The unit suite exercises parsing, input-mode resolution, guide filtering,
+GO/PW-KFI counting, pathway identifier reconciliation, report generation, and
+report-source integrity. It does not replace an end-to-end run of all external
+Docker images and network services.
 
 ## Troubleshooting
 
-### Docker Issues
-```bash
-# Check Docker daemon
-docker ps
+### A single step cannot find its input
 
-# Add user to docker group
-sudo usermod -aG docker $USER
-```
+Use the complete existing run name with `--name`. Omitting it creates a new,
+empty timestamped run directory.
 
-### Memory Issues
-```bash
-# Check available memory
-free -h
+### Docker build or permission failure
 
-# Reduce CRISPR memory allocation in config
-crispr:
-  memory: "16g"
-```
+Confirm that the daemon is running and that both `docker` and the current
+implementation's `sudo docker build` calls work in your environment. Linux
+group-management commands such as `usermod` do not apply to Docker Desktop on
+macOS.
 
-### Input File Format
-```bash
-# Verify FASTA format
-head -2 transcriptome.fasta
-# Should show: ">sequence_header"
-#             "sequence_data"
-```
+### GO annotations are empty
 
-## Input File Requirements
+Check that the best-hit subject identifiers resolve as UniProtKB accessions and
+that the UniProt REST API is reachable. A generic custom FASTA identifier is
+accepted by annotation but is not automatically convertible to a UniProt
+record.
 
-### Transcriptome
-- Format: FASTA (`.fa`, `.fasta`, `.fna`)
-- One transcript per sequence
-- Valid DNA sequences (ACGTN)
-- Recommended: High-quality assembly from assembler like Trinity, SPAdes
+### Reports open without styling or images
 
-### UniProt Database
-- Format: FASTA with UniProt headers
-- Download from: https://www.uniprot.org/downloads
-- Swiss-Prot recommended over TrEMBL for accuracy
-- Organism-specific databases acceptable
-
-### Genome Assembly (Optional)
-- Format: FASTA
-- Required for comprehensive off-target analysis
-- Improves guide RNA specificity prediction
-
-## System Requirements
-
-- **Operating System**: Linux/macOS
-- **RAM**: 16GB minimum (32GB+ recommended)
-- **Storage**: 50GB+ for intermediate files
-- **Docker**: Latest version
-- **Python**: 3.8+
+Open the HTML from its run directory and retain the neighboring `static/`
+directory. No Flask server is started by the current pipeline.
 
 ## Citation
 
-If you use tWhEEL in your research, please cite:
+The repository does not currently provide a finalized publication citation.
+Until one is available, cite the repository URL together with the Git tag or
+commit used and the access date.
 
-```
-Nakamae, K., et al. (Year). tWhEEL: A comprehensive pipeline for 
-transcriptome-based CRISPR target prioritization.
-```
+## License and support
 
-## Support
+tWhEEL is distributed under the MIT License; see [LICENSE](LICENSE).
 
-For issues, questions, or feature requests:
-- Open an issue on GitHub
-- Check existing documentation
-- Review the twheel.log file for error details
+Report reproducible problems through the repository's GitHub Issues page and
+include the command, configuration (with sensitive paths removed),
+`twheel.log`, and the failing step.
 
-## License
+## Related resources
 
-See LICENSE file for details.
-
-## Contributing
-
-Contributions welcome! Please see CONTRIBUTING.md for guidelines.
-
-## Related Resources
-
-- [CRISPR/Cas9 Guide Design Best Practices](https://www.addgene.org/crispr/)
-- [Gene Ontology Project](http://geneontology.org/)
-- [UniProt Database](https://www.uniprot.org/)
 - [TransDecoder](https://github.com/TransDecoder/TransDecoder)
+- [BUSCO](https://busco.ezlab.org/)
+- [FASTA programs](https://fasta.bioch.virginia.edu/)
+- [CrisFlash](https://github.com/tsuryuchka/CRISPRFlash)
+- [Gene Ontology](https://geneontology.org/)
+- [UniProt](https://www.uniprot.org/)
+- [WikiPathways](https://www.wikipathways.org/)

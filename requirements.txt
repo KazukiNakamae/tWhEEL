@@ -1,38 +1,37 @@
-# tWhEEL - トランスクリプトーム機能解析パイプライン
-# 必要なPythonパッケージ
+# Python dependencies for tWhEEL
 
-# 基本パッケージ
+# Core packages
 pyyaml>=6.0
 pandas>=1.5.0
 numpy>=1.21.0
 
-# ログ機能
+# Logging
 colorlog>=6.7.0
 
-# Web関連
+# HTTP and report support
 flask>=2.3.0
 jinja2>=3.1.0
 requests
 
-# 科学計算
+# Scientific computing
 scipy>=1.9.0
 matplotlib>=3.5.0
 seaborn>=0.11.0
 
-# バイオインフォマティクス
+# Bioinformatics
 biopython>=1.79
 
-# 可視化
+# Visualization
 plotly>=5.0.0
 bokeh>=3.0.0
 
-# 開発・テスト
+# Development and testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
 black>=22.0.0
 flake8>=5.0.0
 
-# その他ユーティリティ
+# Utilities
 tqdm>=4.64.0
 pathlib2>=2.3.0
 click>=8.0.0

@@ -1,830 +1,497 @@
-# tWhEEL Software Specification
+# tWhEEL Implementation Specification
 
-## Table of Contents
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Module Specifications](#module-specifications)
-4. [Data Flow](#data-flow)
-5. [API Documentation](#api-documentation)
-6. [Development Guidelines](#development-guidelines)
-7. [Extension Guide](#extension-guide)
-8. [Code Quality Standards](#code-quality-standards)
+This document describes the behavior implemented in the current source tree.
+It is an implementation reference, not a roadmap. User-facing setup and usage
+belong in `README.md`.
 
----
+## 1. Scope
 
-## Overview
+tWhEEL is a sequential, configuration-driven transcriptome workflow with two
+supported analysis profiles:
 
-**tWhEEL** (Transcriptome Workflow for Hierarchical Exploration and Expression Levels) is a comprehensive bioinformatics pipeline designed for:
-- Transcriptome analysis and ORF prediction
-- Functional annotation of genes
-- CRISPR guide RNA design with specificity analysis
-- Gene Ontology-based knockout feasibility assessment
-- Interactive reporting and data visualization
+```text
+GO profile
+gene_prediction -> annotation -> guide_design -> go_analysis
+                -> report_generation
 
-### Design Principles
-- **Modularity**: Each analysis step is a self-contained module
-- **Transcriptome-centric**: Transcriptome data is the foundation for all analyses
-- **Flexibility**: Support for both TransDecoder mode and existing protein sequences
-- **Scalability**: Designed to handle large transcriptomes (100k+ sequences)
-- **Traceability**: Comprehensive logging and intermediate file preservation
-
----
-
-## Architecture
-
-### High-Level System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    User Configuration                        │
-│              (config/*.yaml files)                           │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-┌────────────────────────▼────────────────────────────────────┐
-│                tWhEELPipeline (Main Orchestrator)          │
-│              (src/twheel.py)                                │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-┌───────▼───────┐ ┌─────▼──────┐ ┌──────▼───────┐
-│ Gene Pred.    │ │ Annotation │ │ Guide Design │
-│ (TransDecoder)│ │ (FASTA)    │ │ (CRISPRFlash)│
-└────────┬──────┘ └──────┬─────┘ └───────┬──────┘
-         │                │              │
-         └────────────────┼──────────────┘
-                          │
-         ┌────────────────┼────────────────┐
-         │                │                │
-    ┌────▼──────┐  ┌──────▼────┐  ┌───────▼────┐
-    │GO Analysis│  │Pathway    │  │Report      │
-    │(GO-KFI)   │  │Analysis   │  │Generation  │
-    └────┬──────┘  └──────┬────┘  └───────┬────┘
-         │                │               │
-         └────────────────┼───────────────┘
-                          │
-         ┌────────────────▼────────────────┐
-         │    Output Generation           │
-         │  (HTML, CSV, JSON, SQLite)     │
-         └──────────────────────────────────┘
+Pathway profile
+gene_prediction -> sgd_annotation -> guide_design -> pathway_analysis
+                -> pathway_report_generation
 ```
 
-### Module Dependency Graph
+The two profiles should use separate run directories. `annotation` and
+`sgd_annotation` publish the same intermediate artifact names, so they are
+alternatives rather than safe parallel branches within one run.
 
+## 2. Runtime architecture
+
+`src/twheel.py` provides the CLI and the `tWhEELPipeline` orchestrator. It:
+
+1. loads YAML with duplicate-key rejection;
+2. derives a timestamped or reused run directory from `output.base_dir` and
+   `--name`;
+3. sets `output.intermediate` to `<run>/intermediate`;
+4. creates the run, intermediate, and web-data directories;
+5. validates full-run inputs; and
+6. invokes configured steps sequentially.
+
+Most external bioinformatics tools run through the Docker CLI via
+`subprocess`. The report modules are local Python code and generate static HTML,
+JSON, assets, and a small SQLite GO metadata cache.
+
+### 2.1 Implemented step dispatch
+
+`tWhEELPipeline.run_step()` accepts:
+
+- `gene_prediction`
+- `annotation`
+- `sgd_annotation`
+- `guide_design`
+- `go_analysis`
+- `pathway_analysis`
+- `pathway_report_generation`
+- `report_generation`
+
+An unknown step returns failure. A single `--step` invocation does not execute
+prerequisites and does not call the full-run `validate_inputs()` method.
+
+### 2.2 Output-directory contract
+
+- A simple name creates
+  `<output.base_dir>/tWhEEL_on_<timestamp>_<name>`.
+- No name creates `<output.base_dir>/tWhEEL_on_<timestamp>`.
+- A complete name beginning with `tWhEEL_on_` is reused below the configured
+  output root.
+- If `output.base_dir` already names that complete run directory, it is not
+  nested a second time.
+- `output.base_dir` must be a non-empty string. A leading `~` is expanded.
+- The configured `output.intermediate` value is replaced at runtime.
+
+Directory reuse is not checkpoint detection. A full run executes every entry
+in `execution.steps` again.
+
+## 3. Configuration contract
+
+### 3.1 Configuration sections by workflow
+
+Every complete pipeline run uses `input`, `output`, and `execution` mappings.
+Additional mappings are required by the steps that read them:
+
+| Step or profile | Required mapping |
+| --- | --- |
+| `gene_prediction` | `transdecoder`, `busco` |
+| `annotation` or `sgd_annotation` | `fasta_search` |
+| `guide_design` | `crispr` |
+| `go_analysis` | `go_analysis` |
+| `report_generation` | `report` |
+| `pathway_analysis` | `pathway_analysis` |
+
+`pathway_report` is optional; `pathway_report_generation` defaults its HTML
+name to `pathway_report.html`. `database` is optional and is read only by the
+standard report generator. A pathway-only profile does not read
+`go_analysis`, `report`, or `database`.
+
+For a full orchestrated run, including `pathway_report_generation` in
+`execution.steps` also makes
+`pathway_analysis.wikipathways_gpml_dir` an input-validation requirement.
+
+### 3.2 Input keys
+
+| Key | Contract |
+| --- | --- |
+| `input.transcriptome` | Required for every full run. Used in both protein input modes. |
+| `input.protein_sequences` | Optional existing protein FASTA. |
+| `input.protein_transcript_mapping` | Required by annotation modules when existing protein mode is effective. |
+| `input.genome_assembly` | Optional off-target reference; transcriptome is the fallback. |
+| `input.protein_db_for_goanalysis` | Required by full-run validation when `annotation`, `go_analysis`, or `report_generation` is configured. |
+| `input.sgd_db` | Required when `sgd_annotation` is configured. Also used for exact pathway cross-reference resolution. |
+
+The existing-protein mapping is a headerless TSV. Blank lines and lines whose
+first character is `#` are skipped. The first two columns are:
+
+```text
+transcript_id<TAB>protein_id
 ```
-twheel.py (main entry point)
-    ├── GenePrediction
-    │   └── docker (TransDecoder)
-    ├── Annotation
-    │   ├── docker (FASTA3)
-    │   └── Sgd_annotation
-    ├── GuideDesign
-    │   └── docker (CRISPRFlash)
-    ├── GOAnalysis
-    │   ├── docker (add-go-columns)
-    │   ├── docker (compute_go_kfi)
-    │   └── docker (count_go_parent_terms)
-    ├── PathwayAnalysis
-    │   └── sqlite3
-    ├── PathwayReportGenerator
-    │   └── sqlite3
-    └── ReportGenerator
-        ├── sqlite3
-        └── requests (QuickGO API)
-```
 
----
+Extra columns are ignored. The loader stores `protein_id -> transcript_id`.
 
-## Module Specifications
+### 3.3 Effective protein input mode
 
-### 1. GenePrediction Module
-**File:** `src/modules/gene_prediction.py`
+`src/modules/input_mode.py` is the shared source of truth:
 
-#### Purpose
-ORF prediction from transcriptome sequences using TransDecoder and quality assessment using BUSCO.
+- existing protein mode is selected when `input.protein_sequences` is non-empty,
+  the file exists, and `transdecoder.skip_if_protein_provided` is true;
+- `skip_if_protein_provided` defaults to true if omitted; and
+- all other cases select TransDecoder mode.
 
-#### Key Classes
-- `GenePrediction`: Main class for gene prediction workflow
+The transcriptome is required in both modes.
 
-#### Configuration Parameters
+### 3.4 Pathway configuration
+
+`pathway_analysis` requires:
+
 ```yaml
-transdecoder:
-  docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
-  min_protein_len: 85
-  skip_if_protein_provided: true
-
-busco:
-  docker_image: "ezlabgva/busco:v5.2.2_cv1"
-  lineage: "metazoa_odb10"
-  cpu: 8
+pathway_analysis:
+  wikipathways_gpml_dir: "/path/to/gpml"
+  target_gene_databases:
+    - database_name: "SGD"
+      id_pattern: "^S\\d{9}$"
+      annotation_key: "sgd_id"
+  minimum_pathway_coverage: 0.5
+  skip_low_coverage_pathways: true
 ```
 
-#### Input/Output
-- **Input:** Transcriptome FASTA file
-- **Output:** 
-  - `query.pep` - Predicted protein sequences
-  - `transdecoder_output/` - TransDecoder results
-  - `busco_output/` - BUSCO assessment
+Every target database entry requires a unique, non-empty `database_name`, a
+valid `id_pattern`, and an `annotation_key`. GPML database names match exactly,
+and identifiers must fully match the configured regular expression. Only
+`*.gpml` files directly inside the configured directory are discovered.
 
-#### Key Methods
-```python
-def __init__(self, config):
-    """Initialize with configuration"""
+### 3.5 Effective and legacy settings
 
-def validate_inputs(self):
-    """Validate input transcriptome file"""
+- `report.generate_html` and `report.generate_summary` are effective.
+- `pathway_report.output_name` is effective and defaults to
+  `pathway_report.html`.
+- `database.force_rebuild` controls rebuilding the minimal GO cache.
+- `execution.verbose` controls the logging level.
+- `execution.parallel` is currently ignored; execution is sequential.
+- `docker.max_memory` and `docker.use_docker` are currently ignored.
+- `report.web_port`, `pathway_report.web_port`, and
+  `pathway_report.generate_html` are currently ignored. No web server is
+  started.
 
-def setup_docker(self):
-    """Configure Docker containers"""
+## 4. Module contracts
 
-def run_transdecoder(self):
-    """Execute TransDecoder prediction"""
+### 4.1 `GenePrediction`
 
-def run_busco(self):
-    """Execute BUSCO quality assessment"""
+File: `src/modules/gene_prediction.py`
 
-def run(self):
-    """Execute complete gene prediction workflow"""
+Responsibilities:
+
+- normalize the transcriptome to `intermediate/transcriptome.fa`;
+- use an existing protein FASTA or run TransDecoder;
+- publish proteins as `intermediate/query.pep`;
+- collect SeqKit statistics;
+- run BUSCO in protein mode; and
+- write `gene_prediction_results.txt`.
+
+The TransDecoder minimum protein length defaults to 100 amino acids and must be
+a positive integer. TransDecoder, SeqKit, and BUSCO run in Docker. BUSCO is
+invoked with `--platform linux/amd64`.
+
+### 4.2 `Annotation` and `Sgd_annotation`
+
+Files:
+
+- `src/modules/annotation.py`
+- `src/modules/sgd_annotation.py`
+
+Both modules:
+
+- require `query.pep`;
+- require the mapping TSV in effective existing protein mode;
+- copy or decompress their configured reference FASTA;
+- run `ggsearch36` with one best hit and `-m10` output;
+- parse best-hit scores and full descriptions;
+- classify hits by shared `subject_id`;
+- extract Single and Multi transcript sequences;
+- align Multi groups and create consensus sequences; and
+- write the common annotation artifacts.
+
+The standard module uses `protein_db_for_goanalysis`; the SGD module uses
+`sgd_db` and preserves SGD/Ensembl identifiers for pathway matching.
+
+Classification is exact:
+
+- `Single`: one query row for a best-hit `subject_id`;
+- `Multi`: more than one query row for that `subject_id`.
+
+The generated `Single_*` or `Multi_*` identifier is the downstream gene-level
+unit. The classification does not independently establish biological gene
+redundancy.
+
+FASTA searches use namespace-specific validated caches:
+
+- `ggsearch_results_annotation.txt` and its `.meta.json`;
+- `ggsearch_results_sgd.txt` and its `.meta.json`.
+
+Cache identity includes the query and database real paths, sizes, modification
+times, namespace, and search settings. Results and metadata are published only
+after a successful non-empty search.
+
+Multi-group alignment builds and runs the local Docker image
+`run_alignment_and_mask/v1.0`. Every expected group must produce exactly one
+non-empty consensus FASTA with the expected identifier.
+
+### 4.3 `GuideDesign`
+
+File: `src/modules/guide_design.py`
+
+Responsibilities:
+
+- copy or decompress the genome assembly, or fall back to the transcriptome;
+- convert supported IUPAC degenerate bases to `N`;
+- prepare Single sequences and validated Multi consensus sequences;
+- run CrisFlash separately for the available Single/Multi groups;
+- retain site-specific targets; and
+- merge guide data into `annotation_with_guides_final.tsv`.
+
+CrisFlash target field four has the form
+`<sequence>/<MM0>/<MM1-2>`. A site-specific target is retained only when
+`MM0 == 1` and `MM1-2 == 0`. Other CrisFlash scores are passed through without
+a tWhEEL-enforced range.
+
+### 4.4 `GOAnalysis`
+
+File: `src/modules/go_analysis.py`
+
+Responsibilities:
+
+- build missing GO helper images;
+- add BP, MF, CC, and combined GO columns through the UniProt REST API;
+- compute GO-KFI by generated `unique_id`;
+- extract fully targetable GO terms;
+- compute parent-term summaries;
+- create a compact GO-to-gene reverse lookup; and
+- write `go_analysis_results.txt`.
+
+Annotation rows are collapsed by `unique_id`; GO terms and guide entries are
+de-duplicated before counting:
+
+```text
+GO-KFI = unique genes with retained guides / unique genes in the GO term
 ```
 
----
+Classification values are `Fully`, `Partially`, and `Not`.
 
-### 2. Annotation Module
-**File:** `src/modules/annotation.py`
+Although standard annotation accepts custom FASTA identifiers, GO lookup
+requires best-hit subject identifiers that can be interpreted as UniProtKB
+accessions.
 
-#### Purpose
-Functional annotation via FASTA search against UniProt database and gene classification.
+### 4.5 `PathwayAnalysis`
 
-#### Key Classes
-- `Annotation`: Main annotation workflow class
-- `ProteinClassifier`: Classifies proteins as Single or Multi (redundant)
+File: `src/modules/pathway_analysis.py`
 
-#### Configuration Parameters
-```yaml
-fasta_search:
-  docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
-  evalue: 0.1
-  threads: 8
+Responsibilities:
+
+- parse GPML 2013a `GeneProduct` nodes;
+- retain only configured database/identifier pairs;
+- match exact annotation identifiers and exact SGD FASTA cross-references;
+- collapse duplicate nodes and exact cross-database aliases into canonical gene
+  units;
+- fail closed for ambiguous or incomplete cross-database identity;
+- enforce pathway coverage policy;
+- compute PW-KFI; and
+- write result and audit artifacts.
+
+Non-evaluable GPML nodes are excluded from the denominator. Exact canonical
+matched and unmatched units are included:
+
+```text
+PW-KFI = canonical pathway genes with retained guides
+         / evaluable canonical pathway genes
 ```
 
-#### Gene Classification Logic
-- **Single**: Unique gene (non-redundant)
-- **Multi**: Multiple transcripts mapping to same gene (redundant)
+Pathways with incomplete cross-database canonicalization are skipped. Low
+coverage pathways are skipped only when `skip_low_coverage_pathways` is true.
 
-#### Input/Output
-- **Input:** `query.pep` from GenePrediction
-- **Output:**
-  - `annotation_classified.txt` - Classified annotations
-  - `multi_genes.fa` / `single_genes.fa` - Classified sequences
+### 4.6 `ReportGenerator`
 
----
+File: `src/modules/report_generator.py`
 
-### 3. Sgd_Annotation Module
-**File:** `src/modules/sgd_annotation.py`
+Responsibilities:
 
-#### Purpose
-Saccharomyces cerevisiae-specific annotation using SGD database.
+- collect standard workflow results;
+- publish the report-source snapshot available for the run;
+- calculate report statistics;
+- generate `summary.txt` when enabled;
+- maintain a minimal, integrity-checked SQLite GO metadata cache;
+- generate `web_data/summary.json`;
+- generate static assets; and
+- generate `report.html` when enabled.
 
-#### Current Limitations
-- **Yeast-specific**: Only works with S. cerevisiae
-- **Known Issue**: Needs generalization for multi-organism support
+QuickGO supplies missing GO labels and definitions. Native analysis tables are
+not loaded into SQLite.
 
-#### Planned Improvements
-- Support for other model organisms
-- Configurable database mappings
-- Cross-organism gene mapping
+### 4.7 `PathwayReportGenerator`
 
-#### Key Methods
-```python
-def __init__(self, config):
-    """Initialize with configuration"""
+File: `src/modules/pathway_report_generator.py`
 
-def load_sgd_database(self):
-    """Load SGD reference database"""
+Responsibilities:
 
-def map_genes_to_sgd(self, genes):
-    """Map gene IDs to SGD identifiers"""
+- require and reconcile `pathway_kfi_table.csv` with
+  `pathway_gene_mapping.tsv`;
+- publish those files and referenced GPML files in the pathway snapshot;
+- reuse the standard report shell and assets;
+- render pathway SVG content from GPML graphics/interactions;
+- embed pathway-specific guide exports;
+- generate `web_data/pathway_summary.json`; and
+- generate one HTML file named by `pathway_report.output_name`.
 
-def run(self):
-    """Execute SGD annotation workflow"""
+The pathway report does not create a pathway SQLite database.
+
+## 5. Artifact contracts
+
+### 5.1 Standard GO artifacts
+
+Key intermediate files include:
+
+- `transcriptome.fa`
+- `query.pep`
+- `annotation_table.txt`
+- `annotation_classified.txt`
+- `annotation_with_guides_final.tsv`
+- `annotation_with_guides_go.tsv`
+- `go_kfi_table.csv`
+- `go_kfi_stat.csv`
+- `go_kfi_table_fully_targetable.csv`
+- `go_reverse_lookup.tsv`
+- `go_parent_counts.csv`
+
+Key run/report files include:
+
+- `twheel.log`
+- `summary.txt` when enabled
+- `report.html` when enabled
+- `static/`
+- `web_data/summary.json`
+- `web_data/twheel_data.db`
+- `web_data/report_generation_results.txt`
+
+### 5.2 Pathway artifacts
+
+Pathway analysis always writes non-empty header-bearing contract files even
+when no pathway is reportable:
+
+- `pathway_kfi_table.csv`
+- `pathway_kfi_fully_targetable.csv`
+- `pathway_gene_mapping.tsv`
+- `pathway_gene_match_audit.tsv`
+- `pathway_annotation_identifier_audit.tsv`
+- `pathway_analysis_results.txt`
+
+The report adds:
+
+- `<pathway_report.output_name>`
+- `web_data/pathway_summary.json`
+- shared `static/` assets
+
+## 6. Report-source storage
+
+File: `src/modules/report_source_store.py`
+
+Report sources are stored under:
+
+```text
+web_data/report_sources/
+├── manifest.json
+└── snapshots/<namespace>-<uuid>/...
 ```
 
----
+The manifest records relative paths, sizes, and SHA-256 hashes. A namespace is
+published by creating an independent copy or filesystem clone, hashing it,
+renaming the completed snapshot, and atomically replacing the manifest under a
+file lock. Unreferenced snapshot directories are pruned.
 
-### 4. GuideDesign Module
-**File:** `src/modules/guide_design.py`
+The standard namespace publishes the report inputs that exist. The pathway
+namespace requires the canonical table/mapping pair and additionally stages
+referenced GPML files.
 
-#### Purpose
-CRISPR guide RNA design using CRISPRFlash with off-target specificity analysis.
+Generator classes may load the last verified namespace when their configured
+`intermediate` directory does not exist. This is not currently exposed as a
+reliable CLI restore path because `tWhEELPipeline` recreates `intermediate`
+during initialization.
 
-#### Key Features
-- Guide RNA sequence design
-- Off-target analysis
-- Specificity scoring (MM0, MM1-2)
-- Site-specific guide identification
+## 7. SQLite cache schema
 
-#### Configuration Parameters
-```yaml
-crispr:
-  docker_image: "kazukinakamae/crisflash:1.2.0"
-  pam_pattern: "NGG"           # SpCas9 PAM
-  max_mismatch: 2
-  threads: 10
-  memory: "40g"
-```
+`web_data/twheel_data.db` is a GO display cache, not the analysis database.
+The current schema contains only:
 
-#### Guide RNA Scoring
-- **MM0**: Perfect matches in off-target regions
-- **MM1-2**: Sequences with 1-2 mismatches
-- **Off-target score**: (0-1 scale) - Specificity assessment
-- **Site-specific**: MM0=1 AND MM1-2=0 → High specificity
-
-#### Input/Output
-- **Input:** Gene sequences (single/multi)
-- **Output:**
-  - `*_targets.bed` - Guide target positions
-  - `*_targets_specific_clean.bed` - Filtered high-specificity guides
-
----
-
-### 5. GOAnalysis Module
-**File:** `src/modules/go_analysis.py`
-
-#### Purpose
-Gene Ontology analysis with GO-KFI (Knock-out Feasibility Index) calculation.
-
-#### GO-KFI Scoring
-```
-GO-KFI Score = (Number of genes with guides) / (Total genes in GO term)
-
-Classification:
-- Fully targetable: 100% of genes have guides (KFI = 1.0)
-- Partially targetable: Some genes have guides (0 < KFI < 1.0)
-- Not targetable: No genes have guides (KFI = 0.0)
-```
-
-#### GO Namespaces
-- **BP**: Biological Process
-- **MF**: Molecular Function
-- **CC**: Cellular Component
-
-#### Configuration Parameters
-```yaml
-go_analysis:
-  add_go_image: "kazukinakamae/add-go-columns:v1.0"
-  compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.0"
-  count_parent_image: "kazukinakamae/count_go_parent_terms:v1.0"
-```
-
-#### Docker Containers
-1. **add-go-columns**: Adds GO annotations to gene list
-2. **compute_go_kfi**: Calculates KFI scores
-3. **count_go_parent_terms**: Analyzes GO hierarchy
-
----
-
-### 6. PathwayAnalysis Module
-**File:** `src/modules/pathway_analysis.py`
-
-#### Purpose
-Pathway-level analysis using WikiPathways GPML files and PW-KFI scoring.
-
-#### PW-KFI Calculation
-```
-PW-KFI Score = (Number of genes with guides) / (Total genes in pathway)
-
-Identical logic to GO-KFI but applied at pathway level
-```
-
-#### GPML Parsing
-- Extracts DataNode elements (genes, metabolites)
-- Parses Xref information (SGD IDs)
-- Reads Graphics coordinates for visualization
-- Identifies Interaction elements (edges)
-
-#### Key Methods
-```python
-def parse_gpml_file(self, gpml_path):
-    """Parse GPML XML file"""
-    # Returns: nodes, edges, pathway metadata
-
-def extract_pathway_metadata(self, root):
-    """Extract pathway name, organism, description"""
-
-def extract_pathway_genes(self, root):
-    """Extract GeneProduct DataNodes"""
-
-def compute_pathway_kfi(self, genes_with_guides, total_genes):
-    """Calculate PW-KFI score"""
-```
-
-#### Output Files
-- `pathway_kfi_table.csv` - KFI scores for all pathways
-- `pathway_kfi_fully_targetable.csv` - Fully targetable pathways
-- `pathway_gene_mapping.tsv` - Pathway-gene relationships
-
----
-
-### 7. Report Generation Modules
-
-#### PathwayReportGenerator
-**File:** `src/modules/pathway_report_generator.py`
-
-- Generates pathway-specific HTML reports
-- Creates SVG visualizations of pathway diagrams
-- Color-codes genes based on guide availability
-- Includes interactive gene information panels
-
-#### ReportGenerator
-**File:** `src/modules/report_generator.py`
-
-- Generates comprehensive HTML dashboard
-- Creates interactive data tables
-- Implements CSV export functionality
-- Generates SQLite database for data persistence
-- Fetches GO term information from QuickGO API
-
----
-
-## Data Flow
-
-### Complete Pipeline Data Flow
-
-```
-Transcriptome (input)
-        ↓
-[GenePrediction]
-        ↓
-Protein sequences (query.pep)
-        ├─→ [Annotation]
-        │        ↓
-        │   Gene classifications
-        │        └─→ [GuideDesign]
-        │              ↓
-        │         Guide RNAs (annotation with guides)
-        │              │
-        │    ┌─────────┴─────────┐
-        │    │ (Two parallel paths: GO OR Pathway analysis)
-        │    │
-        │    ├─→ [GOAnalysis]    └─→ [PathwayAnalysis]
-        │         ↓                    ↓
-        │    GO-KFI scores        PW-KFI scores
-        │         ↓                    ↓
-        │  [Report Generation]  [Pathway Report Generation]
-        │         ↓                    ↓
-        │   HTML Dashboard      Pathway HTML Reports
-        │         ↓                    ↓
-        └─────────┬────────────────────┘
-                  ↓
-     Combined Output (HTML, CSV, JSON, SQLite)
-```
-
-**Key Points:**
-- GO Analysis and Pathway Analysis are independent parallel processes
-- Each requires separate YAML configuration files
-- ReportGenerator handles GO-KFI based reports
-- PathwayReportGenerator handles Pathway-KFI based reports
-- Both can run independently or together
-
-### Pipeline Processing Flow Details
-
-#### Stage 1: Common Pre-analysis Steps
-1. **GenePrediction**
-   - Input: Transcriptome FASTA file
-   - Process: TransDecoder-based ORF prediction (default) or provided protein sequences (existing protein mode)
-   - Output: Predicted protein sequences (query.pep)
-   - Note: TransDecoder can be skipped if protein sequences are provided via config
-
-2. **Annotation**
-   - Input: Protein sequences from GenePrediction
-   - Process: FASTA-based similarity search against Protein Database
-   - Output: Annotated gene sequences with classifications (Single/Multi)
-   - Database dependency: Protein DB for subsequent analysis type
-
-3. **GuideDesign**
-   - Input: Annotated gene sequences
-   - Process: CRISPR guide RNA design using CRISPRFlash
-   - Output: Guide RNA sequences with specificity scoring
-   - Off-target search methods:
-     - Transcriptome assembly-based (default)
-     - Genome assembly-based (recommended): Provides more comprehensive off-target analysis
-   - Note: Genome assembly automatically used when provided in config
-
-#### Stage 2: Parallel Analysis Paths (Choose One or Both)
-
-**Path A: GO-KFI Analysis**
-1. GOAnalysis processes annotated sequences with Protein DB for GO Analysis
-2. Calculates GO-KFI scores for Gene Ontology terms
-3. ReportGenerator creates GO-based HTML dashboard
-4. Output: Interactive HTML report with GO term visualization
-
-**Path B: Pathway-KFI Analysis**
-1. PathwayAnalysis processes annotated sequences with Protein DB for Pathway Analysis
-2. Calculates PW-KFI scores for pathway components
-3. PathwayReportGenerator creates pathway-specific HTML reports
-4. Output: Pathway diagrams with color-coded guide availability
-
-#### Annotation Database Configuration
-
-The Annotation process requires different Protein Database references depending on the analysis path:
-
-- **GO Analysis Path**: Uses `protein_db_for_goanalysis`
-  - Database can be any organism-relevant protein database (e.g., UniProt)
-  - Provides annotations for Gene Ontology term mapping
-  
-- **Pathway Analysis Path**: Uses `sgd_db`
-  - Database should contain genes present in target pathway databases
-  - Currently optimized for Saccharomyces cerevisiae (SGD)
-  - Future versions will support additional organisms
-
-**Important**: Select appropriate protein database for your analysis type and organism.
-
-#### Gene Prediction Flexibility
-
-GenePrediction module supports two operational modes:
-
-1. **TransDecoder Mode (Default)**
-   - Performs de novo ORF prediction from transcriptome
-   - Recommended for novel transcriptomes without existing annotations
-   - Configuration: Leave `protein_sequences` empty or undefined
-
-2. **Existing Protein Mode**
-   - Skips TransDecoder; uses provided protein sequences
-   - Requires: `protein_sequences` file path and `protein_transcript_mapping` file
-   - Mapping file: Tab-separated (TSV) format linking transcript IDs to protein IDs
-   - Useful when working with previously predicted or known protein sequences
-   - Configuration: Specify both `protein_sequences` and `protein_transcript_mapping`
-
-#### Guide Design Off-Target Search Methods
-
-GuideDesign module provides flexible off-target analysis strategies:
-
-1. **Transcriptome Assembly-Based (Default)**
-   - Off-target search limited to transcriptome sequences
-   - Lower computational cost
-   - Suitable when genome assembly unavailable
-   - Configuration: `genome_assembly` not specified
-
-2. **Genome Assembly-Based (Recommended)**
-   - Comprehensive off-target search across entire genome
-   - Identifies off-target sites in non-transcribed regions
-   - Provides more reliable specificity assessment
-   - Higher computational cost (multi-gigabyte genome indexing)
-   - Configuration: Specify `genome_assembly` file path
-   - Automatically used when genome assembly provided
-   - Recommended for CRISPR experiments requiring high specificity
-
-### Database Schema
-
-#### genes table
 ```sql
-CREATE TABLE genes (
-    id INTEGER PRIMARY KEY,
-    query_id TEXT,              -- Original transcript ID
-    subject_id TEXT,            -- UniProt accession
-    gene_name TEXT,
-    classification TEXT,        -- Single/Multi
-    unique_id TEXT,
-    identity REAL,
-    evalue REAL,
-    description TEXT,
-    guide_count INTEGER
-);
-```
+CREATE TABLE report_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
 
-#### guide_rnas table
-```sql
-CREATE TABLE guide_rnas (
-    id INTEGER PRIMARY KEY,
-    gene_unique_id TEXT,
-    chromosome TEXT,
-    start INTEGER,
-    end INTEGER,
-    sequence TEXT,              -- 20bp guide sequence
-    strand TEXT,
-    score REAL,
-    pam_sequence TEXT,
-    gc_content REAL
-);
-```
-
-#### go_terms table
-```sql
 CREATE TABLE go_terms (
-    id INTEGER PRIMARY KEY,
-    go_id TEXT,                 -- GO:xxxxxxx
-    go_name TEXT,
-    go_definition TEXT,
-    go_namespace TEXT,          -- BP/MF/CC
-    total_genes INTEGER,
-    genes_with_guides INTEGER,
-    kfi_score REAL,
-    targetable_type TEXT,       -- Fully/Partially/Not
-    annotated_genes TEXT,
-    annotated_genes_full TEXT
-);
+    go_id TEXT PRIMARY KEY,
+    go_name TEXT NOT NULL,
+    go_definition TEXT NOT NULL
+) WITHOUT ROWID;
 ```
 
----
+The cache is rebuilt atomically when its schema, metadata, GO identifier set,
+or content integrity is invalid. `database.force_rebuild` requests a refresh,
+while usable cached labels remain fallback data if an API refresh fails.
 
-## API Documentation
+## 8. CLI metadata
 
-### Main Pipeline Class
+The implemented options are:
 
-```python
-class tWhEELPipeline:
-    """Main orchestrator for tWhEEL pipeline"""
-    
-    def __init__(self, config_path: str, analysis_name: str = None):
-        """
-        Initialize pipeline with configuration
-        
-        Args:
-            config_path: YAML configuration file path
-            analysis_name: Optional analysis name or directory name
-        """
-    
-    def validate_inputs(self) -> bool:
-        """Validate all input files and configuration"""
-    
-    def run(self) -> bool:
-        """Execute entire pipeline"""
-    
-    def run_step(self, step_name: str) -> bool:
-        """
-        Execute specific pipeline step
-        
-        Args:
-            step_name: One of:
-                - gene_prediction
-                - annotation
-                - guide_design
-                - go_analysis
-                - pathway_analysis
-                - pathway_report_generation
-                - report_generation
-        """
-```
+- `--config`, `-c`
+- `--step`, `-s`
+- `--name`, `-n`
+- `--list-steps`
+- `--version`, `-v`
 
-### Module Base Class
+Two metadata limitations remain in the current source:
 
-```python
-class BaseModule:
-    """Base class for all pipeline modules"""
-    
-    def __init__(self, config: dict):
-        """Initialize module with configuration"""
-        self.config = config
-        self.logger = logging.getLogger(__name__)
-    
-    def run(self) -> bool:
-        """Execute module - must be implemented by subclass"""
-        raise NotImplementedError
-```
+- `--list-steps` lists only the five GO-profile steps even though dispatch also
+  accepts `sgd_annotation` and the two pathway steps.
+- `--version` returns a hard-coded `1.0.0` that is not synchronized with Git
+  tags.
 
-### Configuration Structure
+## 9. Development and extension rules
 
-```python
-config = {
-    'input': {
-        'transcriptome': str,           # Always required
-        'uniprot_db': str,              # Conditional: required for annotation/GO analysis, NOT used for pathway analysis
-        'sgd_db': str,                  # Conditional: required only for pathway analysis (yeast-specific)
-        'protein_sequences': str,       # Optional: skip TransDecoder when provided
-        'protein_transcript_mapping': str,  # Optional: required when protein_sequences is provided
-        'genome_assembly': str          # Optional: improves off-target analysis
-    },
-    'output': {
-        'base_dir': str,
-        'intermediate': str
-    },
-    'execution': {
-        'steps': List[str],
-        'parallel': bool,
-        'verbose': bool
-    },
-    'transdecoder': {...},
-    'busco': {...},
-    'fasta_search': {...},
-    'crispr': {...},
-    'go_analysis': {...},
-    'report': {...},
-    'database': {...},
-    'docker': {...}
-}
-```
+- Run from the repository root because several Docker build contexts and data
+  mounts are relative to the current working directory.
+- Use Python 3.12 for the documented environment.
+- Keep code comments, docstrings, configuration comments, and manuals in
+  English.
+- Add a module class with a `run()` method, import it in `src/twheel.py`, add an
+  explicit `run_step()` branch, add the step to CLI metadata, define its config
+  and artifact contracts, and add tests.
+- Modules are independent classes; there is no `BaseModule` abstraction.
+- Use `logging` for module progress and failures.
+- Preserve native large-result formats and publish only report inputs needed by
+  the report-source store.
+- Use pytest for unit and contract tests.
 
----
+The test suite covers parsers, input-mode consistency, cache invalidation,
+guide filtering, GO/PW-KFI counting, exact pathway identifier reconciliation,
+report-source integrity, SQLite cache integrity, and report generation. Docker
+and remote-service end-to-end execution remains a separate integration concern.
 
-## Development Guidelines
+## 10. Known implementation limitations
 
-### Code Style
-- **Language**: Python 3.8+
-- **Format**: PEP 8 compliant
-- **Docstrings**: Google-style docstrings required
-- **Type hints**: Recommended for all functions
-- **Logging**: Use `logging` module, not `print()`
+- The pathway annotation profile is SGD/*S. cerevisiae*-centered.
+- The two annotation profiles overwrite common filenames and should use
+  separate runs.
+- Execution is sequential; `execution.parallel` is unused.
+- Docker cannot be disabled through the current configuration.
+- Local helper image builds currently invoke `sudo docker build`.
+- BUSCO is forced to the `linux/amd64` platform.
+- Report snapshot fallback is tested at the generator-class level but is not a
+  working public CLI restore flow after `intermediate` deletion.
+- CLI step and version metadata are stale as described above.
+- Dated configuration files reference Git-ignored `LOCAL_DATA` and are local run
+  records rather than portable examples.
 
-### Comment and Documentation Standards
-- All functions must have docstrings
-- Comments should explain WHY, not WHAT
-- Comments must match actual implementation
-- Keep docstrings and code synchronized
+## 11. External services and tools
 
-### Error Handling
-- Use try-except blocks appropriately
-- Log all errors with full context
-- Provide meaningful error messages
-- Use custom exceptions where needed
+- TransDecoder
+- BUSCO
+- SeqKit
+- FASTA/ggsearch36
+- CrisFlash
+- MAFFT
+- UniProt REST API
+- QuickGO API
+- Gene Ontology OBO/GO Slim resources
+- WikiPathways GPML
 
-### Testing
-- Unit tests for critical functions
-- Integration tests for module workflows
-- Test data should be representative
-- Use pytest framework
+## Document information
 
-### Logging Standards
-- **INFO**: Pipeline progress milestones
-- **DEBUG**: Detailed execution information
-- **WARNING**: Potential issues or fallbacks
-- **ERROR**: Critical failures that stop execution
-
----
-
-## Extension Guide
-
-### Adding a New Analysis Step
-
-1. **Create Module File**
-```python
-# src/modules/new_analysis.py
-
-from modules.base import BaseModule
-
-class NewAnalysis(BaseModule):
-    """New analysis module"""
-    
-    def __init__(self, config):
-        super().__init__(config)
-        self.logger.info("Initializing NewAnalysis")
-    
-    def run(self):
-        """Execute analysis"""
-        try:
-            # Implementation
-            self.logger.info("NewAnalysis completed successfully")
-            return True
-        except Exception as e:
-            self.logger.error(f"Error in NewAnalysis: {e}")
-            return False
-```
-
-2. **Add to twheel.py**
-```python
-# In twheel.py
-
-from modules.new_analysis import NewAnalysis
-
-# In run_step method:
-elif step_name == "new_analysis":
-    analyzer = NewAnalysis(self.config)
-    analyzer.run()
-
-# In available steps:
-steps = ["gene_prediction", ..., "new_analysis", ...]
-```
-
-3. **Update Configuration**
-```yaml
-# config/default.yaml
-
-new_analysis:
-  parameter1: value1
-  parameter2: value2
-
-execution:
-  steps:
-    - "gene_prediction"
-    - "new_analysis"
-```
-
-### Docker Integration
-
-When using Docker containers:
-
-1. **Create Dockerfile**
-```dockerfile
-FROM ubuntu:20.04
-WORKDIR /app
-COPY . .
-RUN apt-get update && apt-get install -y ...
-ENTRYPOINT ["python", "main.py"]
-```
-
-2. **Reference in Config**
-```yaml
-new_analysis:
-  docker_image: "myregistry/new_analysis:v1.0"
-  parameter1: value1
-```
-
-3. **Use in Module**
-```python
-def run_docker(self):
-    """Run analysis in Docker container"""
-    docker_image = self.config['new_analysis']['docker_image']
-    subprocess.run([
-        'docker', 'run', '--rm',
-        '-v', f'{input_dir}:/input',
-        '-v', f'{output_dir}:/output',
-        docker_image,
-        '--input', '/input/data.txt',
-        '--output', '/output/results.txt'
-    ])
-```
-
----
-
-## Code Quality Standards
-
-### Required Documentation
-- Module docstrings (top of each file)
-- Class docstrings
-- Function/method docstrings with:
-  - Description
-  - Args
-  - Returns
-  - Raises (if applicable)
-- Complex logic comments
-
-### Comment Requirements
-- Update comments when code changes
-- Comments should align with implementation
-- Avoid outdated or misleading comments
-- Use TODO/FIXME for known issues
-
-### Performance Considerations
-- Avoid unnecessary data copying
-- Use generators for large datasets
-- Profile code for bottlenecks
-- Optimize Docker container sizes
-- Cache expensive computations
-
-### Testing Requirements
-- >80% code coverage for new code
-- Unit tests for utility functions
-- Integration tests for workflows
-- Edge case testing
-
-### Version Control
-- Descriptive commit messages
-- Logical commit grouping
-- Reference issues in commits
-- Keep commits focused and atomic
-
----
-
-## Known Limitations and Future Improvements
-
-### Current Limitations
-1. SGD annotation limited to Saccharomyces cerevisiae
-2. Japanese text in some output messages and code comments
-3. Unused data generation in report scripts
-4. Some script comments don't match current implementation
-
-### Planned Improvements
-- Multi-organism support (Phase 2)
-- English language standardization (Phase 1.1)
-- Report optimization (Phase 1.3)
-- Code comment and documentation sync (Phase 1.2)
-- Advanced visualization (Phase 3)
-- Parallel processing (Phase 4)
-
----
-
-## References
-
-### External Tools Documentation
-- [TransDecoder](https://github.com/TransDecoder/TransDecoder)
-- [BUSCO](https://busco.ezlab.org/)
-- [FASTA/SSEARCH](https://fasta.bioch.virginia.edu/)
-- [CRISPRFlash](https://github.com/tsuryuchka/CRISPRFlash)
-- [Gene Ontology](http://geneontology.org/)
-- [UniProt](https://www.uniprot.org/)
-- [WikiPathways](https://www.wikipathways.org/)
-
-### Python Libraries
-- `pyyaml` - Configuration file parsing
-- `pandas` - Data manipulation
-- `sqlalchemy` - Database ORM
-- `requests` - HTTP requests
-- `docker` - Docker API client
-
----
-
-## Document Information
-
-- **Version**: 1.0.0
-- **Last Updated**: November 2025
-- **Maintainer**: tWhEEL Development Team
-- **Status**: Active Development
+- **Status:** Current implementation reference
+- **Reviewed:** 2026-07-16
+- **Version authority:** Source behavior and Git history; the hard-coded CLI
+  version is currently stale

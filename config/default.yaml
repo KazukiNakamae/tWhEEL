@@ -1,68 +1,55 @@
-# tWhEEL - トランスクリプトーム機能解析パイプライン設定ファイル
+# tWhEEL standard GO-workflow configuration template
 
-# 入力ファイル設定
 input:
-  transcriptome: ""    # トランスクリプトームファイル (.fsa_nt or .fa)
-  protein_sequences: ""  # 既存のアミノ酸配列ファイル (.fasta/.fa/.pep)
-  protein_transcript_mapping: ""  # タンパク質ID→トランスクリプトIDマッピングファイル (.tsv) 
-  genome_assembly: ""  # ゲノムアセンブリファイル (.fna or .fa)
-  protein_db_for_goanalysis: ""       # GO解析用タンパク質データベースファイル (.fasta)
+  transcriptome: ""  # Required transcript FASTA; .gz is supported
+  protein_sequences: ""  # Optional existing protein FASTA; .gz is supported
+  protein_transcript_mapping: ""  # Headerless TSV: transcript_id<TAB>protein_id
+  genome_assembly: ""  # Optional off-target FASTA; transcriptome is the fallback
+  protein_db_for_goanalysis: ""  # Protein FASTA whose best-hit IDs resolve in UniProt
 
-# 出力ディレクトリ設定
 output:
-  base_dir: "outputs"
-  intermediate: "outputs/intermediate"
-  
-# TransDecoder設定
+  base_dir: "outputs"  # Root below which a timestamped run directory is created
+  intermediate: "outputs/intermediate"  # Replaced with <run>/intermediate at startup
+
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
   min_protein_len: 100
-  skip_if_protein_provided: true  # protein_sequencesが指定されている場合、TransDecoderをスキップ
+  skip_if_protein_provided: true
 
-# BUSCO評価設定
 busco:
   docker_image: "ezlabgva/busco:v5.2.2_cv1"
   lineage: "metazoa_odb10"
   cpu: 8
 
-# FASTA検索設定
 fasta_search:
   docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
   evalue: 0.1
   threads: 8
 
-# CRISPRガイド設計設定
 crispr:
   docker_image: "kazukinakamae/crisflash:1.2.0"
   pam_pattern: "NGG"
   max_mismatch: 2
   threads: 10
   memory: "40g"
-  # 注意: genome_assemblyが指定されていない場合、オフターゲット検索にtranscriptomeを使用します
-  # この場合、ゲノム全体をカバーしないため、オフターゲット検索の精度が低下する可能性があります
 
-# GO解析設定
 go_analysis:
   add_go_image: "kazukinakamae/add-go-columns:v1.0"
   compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.0"
   count_parent_image: "kazukinakamae/count_go_parent_terms:v1.0"
 
-# レポート設定
 report:
   generate_html: true
   generate_summary: true
-  web_port: 5000
+  web_port: 5000  # Legacy setting; the current pipeline generates static files only
 
-# データベース設定
 database:
-  force_rebuild: false  # 既存データベースを強制的に再作成する場合はtrueに設定
+  force_rebuild: false  # Rebuild the minimal GO metadata cache when true
 
-# Docker設定
 docker:
-  max_memory: "40g"
-  use_docker: true
+  max_memory: "40g"  # Legacy setting; individual modules set Docker limits directly
+  use_docker: true  # Legacy setting; Docker cannot currently be disabled
 
-# 実行設定
 execution:
   steps:
     - "gene_prediction"
@@ -70,5 +57,5 @@ execution:
     - "guide_design"
     - "go_analysis"
     - "report_generation"
-  parallel: false
+  parallel: false  # Legacy setting; steps currently run sequentially
   verbose: true
