@@ -27,7 +27,6 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             },
             'crispr': {
                 'pam_pattern': 'NAG',
-                'max_mismatch': 3,
                 'threads': 7,
             },
             'busco': {'lineage': 'fixture_lineage'},
@@ -920,8 +919,17 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertIn('Critical guide-design limitation', html_content)
-        self.assertIn('splice-junction', html_content)
+        self.assertIn(
+            'Genome-backed target-locus validation required', html_content
+        )
+        self.assertIn('MM0=0', html_content)
+        self.assertIn('MM0=1', html_content)
+        self.assertIn('MM1-2=0', html_content)
+        self.assertIn('intended gene locus', html_content)
+        self.assertIn('GFF/GTF', html_content)
+        self.assertNotIn(
+            'otherwise lack a contiguous genomic target', html_content
+        )
 
         self.generator.config['input']['genome_assembly'] = ''
         preliminary_html = self.generator.create_pathway_html_template(
@@ -938,6 +946,10 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         )
         self.assertIn(
             'Preliminary feasibility screening only', preliminary_html
+        )
+        self.assertIn('splice-junction', preliminary_html)
+        self.assertIn(
+            'does not establish a contiguous genomic target', preliminary_html
         )
 
     def test_html_shell_does_not_embed_large_pathway_payload(self):
@@ -1096,7 +1108,7 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         )
         self.assertEqual(
             embedded_data['config']['crispr'],
-            {'pam_pattern': 'NAG', 'max_mismatch': 3, 'threads': 7},
+            {'pam_pattern': 'NAG', 'threads': 7},
         )
         self.assertEqual(
             embedded_data['config']['busco'],
@@ -1106,7 +1118,10 @@ class PathwayReportIdentifierTests(unittest.TestCase):
         self.assertNotIn('FIXTURE_GUIDE_NAG', html_content)
         self.assertIn('fixture_genome.fa', html_content)
         self.assertIn('<strong>PAM Pattern:</strong> NAG', html_content)
-        self.assertIn('<strong>Max Mismatch:</strong> 3', html_content)
+        self.assertIn(
+            '<strong>Maximum Mismatch (fixed by tWhEEL):</strong> 2',
+            html_content,
+        )
         self.assertIn('<strong>Threads:</strong> 7', html_content)
 
     def test_common_sections_collapse_multi_contig_rows(self):

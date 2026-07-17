@@ -140,15 +140,28 @@ class ReportDatabaseTests(unittest.TestCase):
                 '',
                 'transcriptome_only_preliminary',
                 'Preliminary feasibility screening only',
+                (
+                    'splice-junction',
+                    'does not establish a contiguous genomic target',
+                    'mismatch limit fixed at 2',
+                ),
             ),
             (
                 '/analysis/genome.fa',
                 'genome_off_target_reference',
-                'Critical guide-design limitation',
+                'Genome-backed target-locus validation required',
+                (
+                    'up to 2 mismatches',
+                    'MM0=0',
+                    'MM0=1',
+                    'MM1-2=0',
+                    'intended gene locus',
+                    'GFF/GTF',
+                ),
             ),
         )
 
-        for genome_path, mode, title in scenarios:
+        for genome_path, mode, title, expected_phrases in scenarios:
             with self.subTest(mode=mode):
                 with tempfile.TemporaryDirectory() as temp_dir_name:
                     config = self._config(Path(temp_dir_name))
@@ -176,13 +189,29 @@ class ReportDatabaseTests(unittest.TestCase):
                 marker = f'data-guide-design-scope="{mode}"'
                 self.assertEqual(html.count(marker), 1)
                 self.assertIn(title, html)
-                self.assertIn('splice-junction', html)
+                for expected_phrase in expected_phrases:
+                    self.assertIn(expected_phrase, html)
                 self.assertLess(
                     html.index(marker),
                     html.index('<!-- General Statistics Section -->'),
                 )
                 self.assertIn(title, summary)
-                self.assertIn('splice-junction', summary)
+                for expected_phrase in expected_phrases:
+                    self.assertIn(expected_phrase, summary)
+                self.assertIn(
+                    '<strong>Maximum Mismatch (fixed by tWhEEL):</strong> 2',
+                    html,
+                )
+                self.assertIn(
+                    'Maximum mismatch (fixed by tWhEEL): 2', summary
+                )
+                if genome_path:
+                    self.assertNotIn(
+                        'otherwise lack a contiguous genomic target', html
+                    )
+                    self.assertNotIn(
+                        'otherwise lack a contiguous genomic target', summary
+                    )
                 self.assertIn('.alert-critical', css)
                 self.assertIn('border: 2px solid #b02a37', css)
 

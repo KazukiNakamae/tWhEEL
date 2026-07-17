@@ -22,7 +22,11 @@ match its `__version__` value.
   without a genome off-target reference.
 - Added prominent GO/PW report warnings that distinguish preliminary
   transcriptome-only screening from genome-backed off-target searches while
-  documenting the remaining transcript-derived splice-junction limitation.
+  documenting `MM0 == 0` exclusion and the remaining lack of intended-locus
+  and GFF/GTF exon-context reconciliation.
+- Removed the `crispr.max_mismatch` YAML option, fixed CrisFlash mismatch
+  searching at `-m 2`, and made stale configurations fail with an explicit
+  migration error.
 
 ## v1.3.1 (2026-07-17)
 
@@ -93,8 +97,9 @@ match its `__version__` value.
 
 - Release preparation must update `src/twheel_metadata.py` and create a matching
   Git tag; this consistency is not yet enforced by release automation.
-- tWhEEL does not yet reconcile transcriptome-derived guide candidates to exon
-  structure or contiguous genomic target coordinates.
+- Genome-backed runs exclude `MM0 == 0` candidates, but tWhEEL does not yet
+  verify that a retained `MM0 == 1` match belongs to the intended gene locus or
+  reconcile that match with GFF/GTF exon structure.
 - There is no `CONTRIBUTING.md`; contribution changes should currently be
   discussed through a GitHub issue.
 

@@ -159,7 +159,6 @@ class AbsoluteOutputDockerCommandTests(unittest.TestCase):
                 'threads': 2,
                 'docker_image': 'crisflash:test',
                 'pam_pattern': 'NGG',
-                'max_mismatch': 3,
             },
         }
         genome_path = self.intermediate_dir / 'reference_for_offtarget.fa'
@@ -186,6 +185,11 @@ class AbsoluteOutputDockerCommandTests(unittest.TestCase):
         self.assertEqual(
             command[command.index('-o') + 1],
             '/data/single_genes_targets.bed',
+        )
+        crisflash_arguments = command[command.index('crisflash') + 1:]
+        self.assertEqual(
+            crisflash_arguments[crisflash_arguments.index('-m') + 1],
+            '2',
         )
 
     def test_seqkit_uses_intermediate_workspace_for_absolute_protein_path(self):

@@ -21,6 +21,7 @@ __pycache__/
 !src/modules/fasta_search_cache.py
 !src/modules/multi_gene_alignment.py
 !src/modules/gene_guide_normalization.py
+!src/modules/guide_design_contract.py
 !src/modules/input_mode.py
 !src/modules/docker_workspace.py
 !src/modules/transcript_mapping.py

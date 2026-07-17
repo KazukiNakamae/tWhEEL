@@ -69,7 +69,13 @@ class CliMetadataTests(unittest.TestCase):
         )
         self.assertIn('does not run or validate prerequisites', help_text)
         self.assertIn('preliminary knockout-feasibility', help_text)
-        self.assertIn('splice-junction boundaries', help_text)
+        self.assertIn('maximum mismatch is fixed at 2', help_text)
+        self.assertIn(
+            'crispr.max_mismatch is not a YAML option', help_text
+        )
+        self.assertIn('MM0=0', help_text)
+        self.assertIn('intended gene', help_text)
+        self.assertIn('GFF/GTF exon structure', help_text)
 
     def test_list_steps_uses_shared_descriptions_without_loading_config(self):
         output = io.StringIO()
@@ -190,6 +196,23 @@ class StrictYamlConfigTests(unittest.TestCase):
                 config = self.pipeline._load_config(config_path)
                 self.assertIsInstance(config, dict)
 
+    def test_removed_max_mismatch_option_is_rejected(self):
+        config_path = self.temp_dir / 'removed-option.yaml'
+        config_path.write_text(
+            'crispr:\n  max_mismatch: 3\n', encoding='utf-8'
+        )
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as error_context:
+                self.pipeline._load_config(config_path)
+
+        self.assertEqual(error_context.exception.code, 1)
+        self.assertIn(
+            'crispr.max_mismatch has been removed', output.getvalue()
+        )
+        self.assertIn('fixed at 2', output.getvalue())
+
     def test_repository_configs_match_the_five_supported_profiles(self):
         config_dir = Path(__file__).resolve().parents[1] / 'config'
         scenarios = {
@@ -224,6 +247,7 @@ class StrictYamlConfigTests(unittest.TestCase):
                 self.assertNotIn('docker', config)
                 self.assertNotIn('parallel', config['execution'])
                 self.assertNotIn('LOCAL_DATA', repr(config))
+                self.assertNotIn('max_mismatch', config['crispr'])
 
                 if has_protein:
                     self.assertTrue(inputs['protein_transcript_mapping'])

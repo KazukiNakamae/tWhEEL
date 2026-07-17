@@ -19,6 +19,10 @@ from modules.input_mode import (
     determine_protein_input_mode,
     get_configured_protein_path,
 )
+from modules.guide_design_contract import (
+    CRISFLASH_MAX_MISMATCH,
+    SITE_SPECIFIC_FILTER_LABEL,
+)
 from modules.multi_gene_alignment import annotation_workspace_lock
 from twheel_metadata import (
     STEP_NAMES,
@@ -128,6 +132,22 @@ def _load_runtime_modules():
         ReportGenerator = implementation
 
 
+def _validate_config_contract(config):
+    """Reject removed options instead of silently ignoring user input."""
+    if not isinstance(config, dict):
+        raise ValueError("The YAML document must contain a mapping")
+
+    crispr = config.get('crispr')
+    if isinstance(crispr, dict) and 'max_mismatch' in crispr:
+        raise ValueError(
+            'crispr.max_mismatch has been removed. CrisFlash maximum '
+            f'mismatch is fixed at {CRISFLASH_MAX_MISMATCH}; remove this '
+            'key from the YAML configuration.'
+        )
+
+    return config
+
+
 class tWhEELPipeline:
     """Main class for tWhEEL pipeline"""
     
@@ -151,7 +171,7 @@ class tWhEELPipeline:
             loader = _ensure_yaml_loader()
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.load(f, Loader=loader)
-            return config
+            return _validate_config_contract(config)
         except Exception as e:
             print(f"Failed to load configuration file: {e}")
             sys.exit(1)
@@ -518,8 +538,12 @@ Execution behavior:
 
 Guide-design scope:
   A no-genome profile is only for preliminary knockout-feasibility screening.
-  A supplied genome improves off-target searching, but candidate sequences
-  remain transcriptome-derived and may cross splice-junction boundaries.
+  CrisFlash maximum mismatch is fixed at {CRISFLASH_MAX_MISMATCH};
+  crispr.max_mismatch is not a YAML option.
+  With a supplied genome, the normal {SITE_SPECIFIC_FILTER_LABEL} filter excludes MM0=0
+  candidates, including junction-spanning candidates absent from the genome.
+  tWhEEL does not confirm that the retained perfect match is the intended gene
+  locus or validate it against GFF/GTF exon structure.
         """
     )
     

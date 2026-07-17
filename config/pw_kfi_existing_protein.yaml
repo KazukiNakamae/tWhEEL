@@ -26,7 +26,6 @@ fasta_search:
 crispr:
   docker_image: "kazukinakamae/crisflash:1.2.0"
   pam_pattern: "NGG"
-  max_mismatch: 2
   threads: 10
   memory: "40g"
 

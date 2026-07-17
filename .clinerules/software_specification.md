@@ -27,7 +27,7 @@ alternatives rather than safe parallel branches within one run.
 
 `src/twheel.py` provides the CLI and the `tWhEELPipeline` orchestrator. It:
 
-1. loads YAML with duplicate-key rejection;
+1. loads YAML with duplicate-key and removed-option rejection;
 2. derives a timestamped or reused run directory from `output.base_dir` and
    `--name`;
 3. sets `output.intermediate` to `<run>/intermediate`;
@@ -166,6 +166,9 @@ and identifiers must fully match the configured regular expression. Only
 
 ### 3.5 Effective and legacy settings
 
+- CrisFlash mismatch searching is fixed at `-m 2`. The removed
+  `crispr.max_mismatch` key is rejected so that a stale YAML value cannot appear
+  to alter the `MM1-2` result contract.
 - `report.generate_html` and `report.generate_summary` are effective.
 - `report.guide_chunk_rows` is effective and defaults to `5000`.
 - `pathway_report.output_name` is effective and defaults to
@@ -287,6 +290,7 @@ Responsibilities:
 - prepare transcriptome-derived Single sequences and validated Multi consensus
   sequences for the CrisFlash `-s` candidate-target input;
 - run CrisFlash separately for the available Single/Multi groups;
+- always invoke CrisFlash with the fixed maximum-mismatch argument `-m 2`;
 - retain site-specific targets; and
 - publish one normalized gene/guide generation.
 
@@ -310,13 +314,18 @@ inputs; stale current data fails closed.
 CrisFlash target field four has the form
 `<sequence>/<MM0>/<MM1-2>`. A site-specific target is retained only when
 `MM0 == 1` and `MM1-2 == 0`. Other CrisFlash scores are passed through without
-a tWhEEL-enforced range.
+a tWhEEL-enforced range. `MM1-2` remains an output hit-count field; it is not a
+YAML option. The removed `crispr.max_mismatch` key is rejected during
+configuration loading.
 
 A supplied genome improves only the off-target reference. Candidate sequences
 remain transcriptome-derived and are not reconciled to genomic exon coordinates
-or splice structure. A candidate may therefore cross an exon-exon boundary or
-otherwise lack a contiguous genomic target. Experimental guide selection
-requires independent genome-coordinate and exon-structure validation.
+or splice structure. With a genome reference, the normal `MM0 == 1` and
+`MM1-2 == 0` filter removes candidates with no exact genomic occurrence,
+including junction-spanning candidates reported as `MM0 == 0`. The filter does
+not verify that the retained perfect match is the intended gene locus or
+reconcile that match with GFF/GTF exon structure. Experimental guide selection
+requires independent locus and exon-context validation.
 
 ### 4.4 `GOAnalysis`
 
@@ -428,8 +437,9 @@ scripts use script-safe serialization, and dynamic report tables never place
 unescaped external strings into `innerHTML` or inline event-handler source.
 
 The HTML and text summary identify a no-genome run as preliminary-only. When a
-genome was configured, they state that it was used for off-target searching but
-that candidates remain transcriptome-derived and may cross splice junctions.
+genome was configured, they state that `MM0 == 0` candidates were excluded from
+normalized results but that the retained perfect match is not assigned to the
+intended gene locus or reconciled with GFF/GTF exon structure.
 
 QuickGO supplies missing GO labels and definitions. Native analysis tables are
 not loaded into SQLite.
@@ -658,9 +668,9 @@ and remote-service end-to-end execution remains a separate integration concern.
   pending explicit migration and regression testing.
 - Report snapshot fallback is tested at the generator-class level but is not a
   working public CLI restore flow after `intermediate` deletion.
-- Even genome-backed runs can contain transcriptome-derived candidate guides
-  that cross splice junctions; tWhEEL does not yet perform genomic target-site
-  reconciliation.
+- Genome-backed runs exclude `MM0 == 0` candidates, but tWhEEL does not verify
+  that a retained `MM0 == 1` match lies at the intended gene locus or within
+  the intended GFF/GTF exon structure.
 - Portable configuration templates contain explicit absolute-path placeholders
   and are not runnable until those paths and the BUSCO lineage are replaced.
 

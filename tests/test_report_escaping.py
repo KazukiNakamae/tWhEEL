@@ -57,7 +57,6 @@ class ReportEscapingTests(unittest.TestCase):
             },
             'crispr': {
                 'pam_pattern': dangerous,
-                'max_mismatch': dangerous,
                 'threads': dangerous,
             },
             'busco': {

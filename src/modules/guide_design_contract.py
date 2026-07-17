@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Fixed CrisFlash search and site-specific guide-selection parameters."""
+
+
+CRISFLASH_MAX_MISMATCH = 2
+SITE_SPECIFIC_EXACT_MATCHES = 1
+SITE_SPECIFIC_APPROXIMATE_MATCHES = 0
+
+SITE_SPECIFIC_FILTER_LABEL = (
+    f"MM0={SITE_SPECIFIC_EXACT_MATCHES} and "
+    f"MM1-{CRISFLASH_MAX_MISMATCH}={SITE_SPECIFIC_APPROXIMATE_MATCHES}"
+)
+

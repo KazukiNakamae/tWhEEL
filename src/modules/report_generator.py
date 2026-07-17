@@ -25,6 +25,10 @@ except ModuleNotFoundError:
 
 from .report_source_store import ReportSourceStore
 from .report_payload_store import ReportPayloadStore
+from .guide_design_contract import (
+    CRISFLASH_MAX_MISMATCH,
+    SITE_SPECIFIC_FILTER_LABEL,
+)
 
 # CSVフィールドサイズ制限を増加
 csv.field_size_limit(1 << 30)
@@ -234,15 +238,21 @@ class ReportGenerator:
         if genome_provided:
             return {
                 'mode': 'genome_off_target_reference',
-                'title': 'Critical guide-design limitation',
+                'title': 'Genome-backed target-locus validation required',
                 'message': (
-                    'A genome assembly was supplied for off-target screening, '
-                    'but candidate guide RNAs are still designed from '
-                    'transcriptome-derived target sequences. Some candidates '
-                    'can span exon-exon (splice-junction) boundaries or '
-                    'otherwise lack a contiguous genomic target. Independently '
-                    'validate every guide against the genome and transcript '
-                    'structure before experimental use.'
+                    'A genome assembly was supplied as the CrisFlash '
+                    'off-target reference. CrisFlash searches reference '
+                    f'matches with up to {CRISFLASH_MAX_MISMATCH} mismatches. '
+                    'The normal pipeline then applies the stricter retention '
+                    f'rule {SITE_SPECIFIC_FILTER_LABEL}, so MM0=0 '
+                    'candidates, including junction-spanning sequences with '
+                    'no exact genomic match, are excluded from normalized '
+                    'GO-KFI/PW-KFI results. Candidate coordinates still '
+                    'originate from transcriptome-derived sequences, and '
+                    'tWhEEL does not verify that the single perfect genomic '
+                    'match is the intended gene locus or validate it against '
+                    'GFF/GTF exon structure. Confirm genomic placement and '
+                    'the intended locus before experimental use.'
                 ),
             }
 
@@ -250,12 +260,16 @@ class ReportGenerator:
             'mode': 'transcriptome_only_preliminary',
             'title': 'Preliminary feasibility screening only',
             'message': (
-                'No genome assembly was supplied, so off-target screening '
-                'uses the transcriptome. Candidate guides are also designed '
-                'from transcriptome-derived target sequences and can span '
-                'exon-exon (splice-junction) boundaries. Use this result only '
-                'for preliminary knockout-feasibility screening, not for '
-                'experimental guide selection.'
+                'No genome assembly was supplied, so CrisFlash searches a '
+                'transcriptome reference rather than a genome, with the '
+                f'mismatch limit fixed at {CRISFLASH_MAX_MISMATCH}. Although '
+                'the normal pipeline applies the stricter retention rule '
+                f'{SITE_SPECIFIC_FILTER_LABEL}, a match '
+                'in that transcriptome reference does not establish a '
+                'contiguous genomic target, and exon-exon (splice-junction) '
+                'candidates can remain. Use this result only for preliminary '
+                'knockout-feasibility screening, not for experimental guide '
+                'selection.'
             ),
         }
 
@@ -1089,7 +1103,10 @@ class ReportGenerator:
             f.write(f"  - Transcriptome: {results['config']['input'].get('transcriptome', 'N/A')}\n")
             f.write(f"  - Protein Database for GO Analysis: {results['config']['input'].get('protein_db_for_goanalysis', 'N/A')}\n")
             f.write(f"PAM pattern: {results['config']['crispr'].get('pam_pattern', 'N/A')}\n")
-            f.write(f"Max mismatch: {results['config']['crispr'].get('max_mismatch', 'N/A')}\n")
+            f.write(
+                "Maximum mismatch (fixed by tWhEEL): "
+                f"{CRISFLASH_MAX_MISMATCH}\n"
+            )
             f.write(f"BUSCO lineage: {results['config']['busco'].get('lineage', 'N/A')}\n")
             
             f.write("\n")
@@ -5530,7 +5547,7 @@ if (typeof module !== 'undefined' && module.exports) {
                                 <h3>CRISPR Settings</h3>
                                 <ul style="text-align: left; font-size: 0.85rem;">
                                     <li><strong>PAM Pattern:</strong> {self._escape_html(results['config']['crispr'].get('pam_pattern', 'N/A'))}</li>
-                                    <li><strong>Max Mismatch:</strong> {self._escape_html(results['config']['crispr'].get('max_mismatch', 'N/A'))}</li>
+                                    <li><strong>Maximum Mismatch (fixed by tWhEEL):</strong> {CRISFLASH_MAX_MISMATCH}</li>
                                     <li><strong>Threads:</strong> {self._escape_html(results['config']['crispr'].get('threads', 'N/A'))}</li>
                                 </ul>
                             </div>
@@ -5891,7 +5908,7 @@ body {{
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">CRISPR Settings</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
                             <li><strong>PAM Pattern:</strong> {self._escape_html(results['config']['crispr'].get('pam_pattern', 'N/A'))}</li>
-                            <li><strong>Max Mismatch:</strong> {self._escape_html(results['config']['crispr'].get('max_mismatch', 'N/A'))}</li>
+                            <li><strong>Maximum Mismatch (fixed by tWhEEL):</strong> {CRISFLASH_MAX_MISMATCH}</li>
                             <li><strong>Threads:</strong> {self._escape_html(results['config']['crispr'].get('threads', 'N/A'))}</li>
                         </ul>
                     </div>
@@ -6508,7 +6525,7 @@ body {{
                         <h3 style="font-size: 1.1rem; margin: 0 0 1rem 0;">CRISPR Settings</h3>
                         <ul style="text-align: left; font-size: 0.85rem; margin: 0; padding-left: 1rem;">
                             <li><strong>PAM Pattern:</strong> {self._escape_html(results['config']['crispr'].get('pam_pattern', 'N/A'))}</li>
-                            <li><strong>Max Mismatch:</strong> {self._escape_html(results['config']['crispr'].get('max_mismatch', 'N/A'))}</li>
+                            <li><strong>Maximum Mismatch (fixed by tWhEEL):</strong> {CRISFLASH_MAX_MISMATCH}</li>
                             <li><strong>Threads:</strong> {self._escape_html(results['config']['crispr'].get('threads', 'N/A'))}</li>
                         </ul>
                     </div>

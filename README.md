@@ -144,12 +144,20 @@ the `*_genome.yaml` profiles.
 Supplying a genome improves the CrisFlash off-target reference; it does not
 change the source of candidate target sequences. Candidate guides are still
 generated from transcriptome-derived Single-gene sequences or Multi-gene
-consensus sequences. Some reported candidates can therefore span exon-exon
-(splice-junction) boundaries or otherwise fail to exist as one contiguous
-target in genomic DNA. Independently validate every candidate against genomic
-coordinates and exon structure before experimental use. Both GO and Pathway
+consensus sequences. In the normal genome-backed pipeline, tWhEEL retains only
+candidates reported by CrisFlash as `MM0 == 1` and `MM1-2 == 0`. Candidates
+with no exact genomic match (`MM0 == 0`), including ordinary junction-spanning
+sequences absent from the genome, are therefore excluded from normalized
+GO-KFI/PW-KFI results.
+
+This count-based filter does not verify that the single perfect match is the
+intended gene locus or reconcile it with GFF/GTF exon structure. A
+transcript-derived junction sequence could, for example, pass if it has one
+perfect match at another genomic locus. Confirm the retained genomic match,
+intended locus, and exon context before experimental use. Both GO and Pathway
 HTML reports display this limitation prominently; reports without a genome are
-also labeled as preliminary-screening output.
+also labeled as preliminary-screening output because a transcriptome match
+does not establish a contiguous genomic target.
 
 ### Quick start: minimum de novo GO-KFI profile
 
@@ -282,8 +290,13 @@ commands do not load the YAML configuration or runtime analysis modules.
 - `input.genome_assembly` is runtime-optional, but omission is supported only
   for preliminary knockout-feasibility screening. When absent, the
   transcriptome is also used as the off-target reference.
-- A supplied genome is used as the off-target reference only. Guide candidate
-  sequences remain transcriptome-derived and may cross splice junctions.
+- With a supplied genome, the normal `MM0 == 1` and `MM1-2 == 0` filter excludes
+  candidates that have no exact genomic match. tWhEEL does not verify that the
+  retained perfect match belongs to the intended gene locus or exon context.
+- CrisFlash is always invoked with a maximum mismatch of `2`.
+  `crispr.max_mismatch` has been removed from the YAML contract, and a
+  configuration that still contains it is rejected instead of being silently
+  ignored.
 - YAML duplicate keys are rejected rather than silently overwritten.
 
 ## Configuration behavior
@@ -311,6 +324,8 @@ The following current behaviors are easy to miss:
   a failed rerun does not replace the previous pointer. Source hashes make a
   rerun of annotation invalidate stale normalized data until `guide_design` is
   rerun.
+- CrisFlash mismatch searching is fixed at `-m 2`; it cannot be changed from a
+  YAML profile.
 - Normalized GO input requires helper images that declare schema support. The
   bundled `v1.2` Dockerfiles carry this label; cached legacy/custom helpers
   without it are rebuilt from the local helper contexts.
@@ -429,9 +444,11 @@ as text while preventing them from becoming executable HTML or JavaScript.
 
 At the top of both HTML report types, a red scope warning distinguishes a
 transcriptome-only preliminary screen from a run that supplied a genome for
-off-target searching. The genome-backed warning still states that guide
-candidates are transcriptome-derived, may span splice-junction boundaries, and
-require independent genomic and exon-structure validation.
+off-target searching. The genome-backed warning states that `MM0 == 0`
+candidates are excluded from normalized results, while retained `MM0 == 1`
+candidates still require intended-locus and GFF/GTF exon-context validation.
+The no-genome warning explains that a transcriptome match does not establish a
+contiguous genomic target and that splice-junction candidates can remain.
 
 ## Result semantics
 
@@ -451,9 +468,11 @@ view, not the primary source for new GO, pathway, or report processing.
 ### Site-specific guides
 
 CrisFlash serializes the guide sequence and mismatch counts in the fourth BED
-field as `<sequence>/<MM0>/<MM1-2>`. The current filter retains a guide only when
-`MM0 == 1` and `MM1-2 == 0`. Any additional score is passed through from
+field as `<sequence>/<MM0>/<MM1-2>`. CrisFlash searches reference matches with
+up to `2` mismatches, after which tWhEEL applies the stricter `MM0 == 1` and
+`MM1-2 == 0` retention rule. Any additional score is passed through from
 CrisFlash; tWhEEL does not enforce a documented 0-1 range.
+`crispr.max_mismatch` is not a supported YAML option.
 
 ### GO-KFI
 

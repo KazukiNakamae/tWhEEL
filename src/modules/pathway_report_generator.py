@@ -21,6 +21,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+from .guide_design_contract import CRISFLASH_MAX_MISMATCH
 from .report_source_store import ReportSourceStore
 try:
     csv.field_size_limit(sys.maxsize)
@@ -3631,7 +3632,7 @@ class PathwayReportGenerator:
                                 <h3>CRISPR Settings</h3>
                                 <ul class="configuration-list">
                                     <li><strong>PAM Pattern:</strong> {escaped(crispr, 'pam_pattern')}</li>
-                                    <li><strong>Max Mismatch:</strong> {escaped(crispr, 'max_mismatch')}</li>
+                                    <li><strong>Maximum Mismatch (fixed by tWhEEL):</strong> {CRISFLASH_MAX_MISMATCH}</li>
                                     <li><strong>Threads:</strong> {escaped(crispr, 'threads')}</li>
                                 </ul>
                             </div>

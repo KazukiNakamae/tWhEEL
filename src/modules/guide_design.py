@@ -11,6 +11,11 @@ import gzip
 import shutil
 
 from .docker_workspace import DockerWorkspace
+from .guide_design_contract import (
+    CRISFLASH_MAX_MISMATCH,
+    SITE_SPECIFIC_APPROXIMATE_MATCHES,
+    SITE_SPECIFIC_EXACT_MATCHES,
+)
 from .gene_guide_normalization import (
     publish_normalized_gene_guide_generation,
 )
@@ -562,7 +567,7 @@ class GuideDesign:
             "-g", workspace.container_path(genome_path),
             "-s", workspace.container_path(gene_path),
             "-p", self.config['crispr']['pam_pattern'],
-            "-m", str(self.config['crispr']['max_mismatch']),
+            "-m", str(CRISFLASH_MAX_MISMATCH),
             "-t", str(self.config['crispr']['threads']),
             "-o", workspace.container_path(output_path)
         ]
@@ -604,7 +609,10 @@ class GuideDesign:
         except ValueError:
             return False
 
-        return mm0 == 1 and mm1_2 == 0
+        return (
+            mm0 == SITE_SPECIFIC_EXACT_MATCHES
+            and mm1_2 == SITE_SPECIFIC_APPROXIMATE_MATCHES
+        )
     
     def filter_site_specific_targets(self, bed_path, gene_type):
         """Extract site-specific targets"""
