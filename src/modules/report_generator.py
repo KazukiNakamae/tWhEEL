@@ -5107,7 +5107,7 @@ if (typeof module !== 'undefined' && module.exports) {
         <main class="main-content">
             <header class="content-header">
                 <h1>tWhEEL</h1>
-                <p class="subtitle">Transcriptome Workflow for Hierarchical Exploration and Expression Levels</p>
+                <p class="subtitle">transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)</p>
             </header>
 
             <div class="content-body">
@@ -5818,7 +5818,7 @@ body {{
         <!-- Header -->
         <div class="header">
             <h1>tWhEEL</h1>
-            <p class="subtitle">transcript-aware Whole-genomic Evaluation for Editing Locus pipeline</p>
+            <p class="subtitle">transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)</p>
             <p>Static Report - Generated on {self._escape_html(results['timestamp'][:19].replace('T', ' '))}</p>
         </div>
 
@@ -6435,7 +6435,7 @@ body {{
         <!-- Header -->
         <div class="header">
             <h1>tWhEEL</h1>
-            <p class="subtitle">Transcriptome Workflow for Hierarchical Exploration and Expression Levels</p>
+            <p class="subtitle">transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)</p>
             <p>Static Report - Generated on {self._escape_html(results['timestamp'][:19].replace('T', ' '))}</p>
         </div>
 

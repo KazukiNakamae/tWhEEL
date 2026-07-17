@@ -2000,7 +2000,7 @@ class PathwayReportGenerator:
         <main class="main-content">
             <header class="content-header">
                 <h1>tWhEEL</h1>
-                <p class="subtitle">Transcriptome Workflow for Hierarchical Exploration and Expression Levels</p>
+                <p class="subtitle">transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)</p>
             </header>
             <div class="content-body">
                 <section id="summary-stats" class="content-section">

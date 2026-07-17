@@ -17,6 +17,7 @@ busco*
 __pycache__/
 *.py
 !src/docker/run_alignment_and_mask/run_alignment_and_mask.py
+!src/docker/create_tx2protein_mapping/create_tx2protein_mapping.py
 !src/docker/count_go_parent_terms/go_slim_mapping.py
 !src/modules/fasta_search_cache.py
 !src/modules/multi_gene_alignment.py

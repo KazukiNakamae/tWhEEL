@@ -9,7 +9,13 @@ match its `__version__` value.
 
 ## Unreleased (current `main` after v1.3.2)
 
-- No changes recorded yet.
+- Corrected the expanded project name to “transcript-aware Whole-genomic
+  Evaluation for Editing Locus (tWhEEL)” in the README, CLI help, and generated
+  GO and pathway report headers, and placed the existing logo at the top of the
+  README.
+- Added a Dockerized RefSeq/Ensembl `tx2protein.tsv` helper with strict FASTA
+  reconciliation, audit JSON output, gzip support, selectable RefSeq XP
+  inclusion, and matched protein FASTA generation for explicit exclusions.
 
 ## v1.3.2 (2026-07-17)
 

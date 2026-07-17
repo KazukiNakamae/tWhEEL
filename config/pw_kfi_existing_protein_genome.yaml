@@ -4,7 +4,7 @@
 input:
   transcriptome: "/absolute/path/to/transcriptome.fasta"
   protein_sequences: "/absolute/path/to/proteins.fasta"
-  protein_transcript_mapping: "/absolute/path/to/transcript_to_protein.tsv"
+  protein_transcript_mapping: "/absolute/path/to/tx2protein.tsv"
   genome_assembly: "/absolute/path/to/genome.fasta"
   sgd_db: "/absolute/path/to/sgd_reference.fasta"
 

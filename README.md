@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="src/web/static/img/logo.png" alt="tWhEEL logo" width="720">
+</p>
+
 # tWhEEL
 
-**Transcriptome Workflow for Hierarchical Exploration and Expression Levels**
+**transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)**
 
 tWhEEL is a Docker-oriented transcriptome analysis pipeline for protein
 prediction, similarity-based annotation, SpCas9 guide design, and knockout
@@ -183,7 +187,7 @@ gene-sequence extraction and guide design.
 input:
   transcriptome: "/absolute/path/to/transcriptome.fasta"
   protein_sequences: "/absolute/path/to/proteins.fasta"
-  protein_transcript_mapping: "/absolute/path/to/transcript_to_protein.tsv"
+  protein_transcript_mapping: "/absolute/path/to/tx2protein.tsv"
 ```
 
 The mapping is a headerless TSV. Lines beginning with `#` and blank lines are
@@ -205,6 +209,83 @@ and `skip_if_protein_provided` is true. A missing protein file causes the shared
 input-mode resolver to select TransDecoder mode, but the existing-protein
 templates intentionally omit a TransDecoder image and must therefore be fixed
 rather than used as fallback configurations.
+
+#### Creating `tx2protein.tsv` from RefSeq or Ensembl
+
+The optional `create_tx2protein_mapping` helper creates and validates the
+mapping from a matching GFF3 annotation, transcript/cDNA FASTA, and
+protein/peptide FASTA. It is intentionally limited to the standard RefSeq and
+Ensembl-style CDS attributes described below; it is not a universal GFF3
+converter. Use three files from the same provider release and assembly.
+
+- RefSeq CDS rows are linked through `Parent=rna-...` and `protein_id=...`.
+- Ensembl CDS rows are linked through `Parent=transcript:...` and
+  `protein_id=...`; an Ensembl peptide-header `transcript:...` token is also
+  accepted as corroborating evidence.
+- Plain-text and gzip-compressed GFF3/FASTA inputs are supported. FASTA IDs are
+  the first header tokens, matching tWhEEL's runtime loader.
+- Exact identifiers are preferred. A missing trailing numeric version is
+  reconciled only when it identifies exactly one FASTA record, and the emitted
+  TSV always uses the actual FASTA identifiers.
+
+Build the dependency-free Python 3.12 helper image once:
+
+```bash
+docker build -t twheel-create-tx2protein:local \
+  src/docker/create_tx2protein_mapping/
+```
+
+For RefSeq, the default `--refseq-xp include` retains both curated NP proteins
+and predicted XP proteins. The command below also requests explicit exclusion
+of any protein that has no transcript FASTA record. This is needed for provider
+sets that contain organellar CDS proteins without corresponding mRNA records,
+which are permitted by the [NCBI GFF3 model](https://www.ncbi.nlm.nih.gov/datasets/docs/v2/reference-docs/file-formats/annotation-files/about-ncbi-gff3/).
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="/absolute/path/to/refseq",dst=/data \
+  twheel-create-tx2protein:local \
+  --source refseq \
+  --refseq-xp include \
+  --unmapped-proteins exclude \
+  --annotation /data/annotation.gff3.gz \
+  --transcripts /data/rna.fna.gz \
+  --proteins /data/protein.faa.gz \
+  --output /data/refseq_tx2protein.tsv \
+  --filtered-proteins /data/refseq_matched_proteins.faa
+```
+
+To omit predicted RefSeq XP proteins, change only
+`--refseq-xp include` to `--refseq-xp exclude`. In both exclusion modes, point
+`input.protein_sequences` to the generated `refseq_matched_proteins.faa`, not
+the original provider protein FASTA, and point
+`input.protein_transcript_mapping` to `refseq_tx2protein.tsv`. This preserves
+the exact protein-coverage contract enforced by tWhEEL.
+
+For matching [Ensembl FTP](https://www.ensembl.org/info/data/ftp/index.html)
+GFF3, cDNA, and peptide files, use strict mode by omitting the exclusion
+options:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="/absolute/path/to/ensembl",dst=/data \
+  twheel-create-tx2protein:local \
+  --source ensembl \
+  --annotation /data/annotation.gff3.gz \
+  --transcripts /data/transcripts.cdna.all.fa.gz \
+  --proteins /data/proteins.pep.all.fa.gz \
+  --output /data/ensembl_tx2protein.tsv
+```
+
+The default `--unmapped-proteins error` policy stops without publishing a
+mapping if any supplied protein cannot be resolved. Selecting `exclude` is an
+explicit request to remove those proteins and creates a matched protein FASTA.
+Ambiguous protein-to-transcript relationships always fail. Every run writes an
+audit JSON beside the TSV (`<output>.audit.json`) with source detection,
+candidate, exclusion, normalization, and output counts. Existing outputs are
+not replaced unless `--force` is supplied.
 
 ### GO-KFI protein database requirement
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tWhEEL - Transcriptome Workflow for Hierarchical Exploration and Expression Levels
+transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)
 
 This script runs the GO and SGD/WikiPathways analysis profiles for protein
 prediction, functional annotation, CRISPR guide design, feasibility scoring,
@@ -505,8 +505,8 @@ def build_parser():
     step_listing = format_step_listing()
     parser = argparse.ArgumentParser(
         description=(
-            'tWhEEL - Transcriptome Workflow for Hierarchical Exploration '
-            'and Expression Levels'
+            'transcript-aware Whole-genomic Evaluation for Editing Locus '
+            '(tWhEEL)'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
