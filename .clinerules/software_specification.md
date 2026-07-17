@@ -616,8 +616,8 @@ The implemented options are:
 `src/twheel_metadata.py` is the canonical runtime metadata source. It defines
 `__version__`, the eight public step names, their workflow assignments, and their
 help summaries. The parser, `--help`, `--list-steps`, and `--step` choices all
-consume this shared definition. The current version is 1.3.1, and
-`--version` prints `tWhEEL version 1.3.1`.
+consume this shared definition. The current version is 1.3.2, and
+`--version` prints `tWhEEL version 1.3.2`.
 
 Help, version, and step-listing requests complete before YAML or analysis-class
 imports. This keeps the CLI metadata inspectable without a fully installed

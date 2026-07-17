@@ -274,7 +274,7 @@ The implemented step names and their main contracts are:
 step metadata. `--step` accepts exactly the eight names above, `--list-steps`
 prints the same names with workflow and purpose, and unknown step names are
 rejected before a configuration is loaded. `--version` currently reports
-`tWhEEL version 1.3.1`; release preparation updates `__version__` once in the
+`tWhEEL version 1.3.2`; release preparation updates `__version__` once in the
 metadata module and creates a matching Git tag. Help, version, and step-listing
 commands do not load the YAML configuration or runtime analysis modules.
 

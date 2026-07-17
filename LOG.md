@@ -7,14 +7,18 @@ Version dates below are taken from Git tags. `src/twheel_metadata.py` is the
 single source for the runtime release version, and release tags are expected to
 match its `__version__` value.
 
-## Unreleased (current `main` after v1.3.1)
+## Unreleased (current `main` after v1.3.2)
+
+- No changes recorded yet.
+
+## v1.3.2 (2026-07-17)
 
 - Fixed CSV field escaping in standard and pathway browser exports and expanded
   regression coverage for commas, quotes, and line breaks.
 - Corrected Docker documentation to describe plain `docker build`, distinguish
   compatibility pins from current upstream releases, and record the Python 3.9
   base-image migration requirement.
-- Centralized release and step metadata, updated `--version` to 1.3.1, and
+- Centralized release and step metadata, updated `--version` to 1.3.2, and
   expanded `--help` and `--list-steps` to cover both workflows and all eight
   implemented steps.
 - Replaced historical local configurations with five portable minimal profiles
