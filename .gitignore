@@ -29,4 +29,5 @@ __pycache__/
 !src/modules/pathway_report_generator.py
 !src/modules/report_source_store.py
 !src/modules/report_payload_store.py
+!src/twheel_metadata.py
 !tests/*.py

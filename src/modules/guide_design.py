@@ -41,14 +41,23 @@ class GuideDesign:
         
         # genome_assemblyが提供されているかチェック
         if genome_path and os.path.exists(genome_path):
-            self.logger.info("Genome assembly provided - using for comprehensive off-target search")
+            self.logger.info(
+                "Genome assembly provided - using it as the off-target "
+                "reference; candidate sequences remain transcriptome-derived"
+            )
             source_path = genome_path
             source_type = "genome assembly"
         else:
             # transcriptomeをフォールバックとして使用
             transcriptome_path = self.config['input']['transcriptome']
-            self.logger.warning("Genome assembly not provided - using transcriptome for off-target search")
-            self.logger.warning("WARNING: Off-target search using transcriptome may be less comprehensive than using genome assembly")
+            self.logger.warning(
+                "Genome assembly not provided - using the transcriptome for "
+                "off-target searching"
+            )
+            self.logger.warning(
+                "This mode is for preliminary knockout-feasibility screening "
+                "only; it does not provide genome-wide off-target assessment"
+            )
             source_path = transcriptome_path
             source_type = "transcriptome"
         

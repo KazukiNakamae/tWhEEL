@@ -79,7 +79,7 @@ Additional mappings are required by the steps that read them:
 
 | Step or profile | Required mapping |
 | --- | --- |
-| `gene_prediction` | `transdecoder`, `busco` |
+| `gene_prediction` | `busco`; `transdecoder.docker_image` only when TransDecoder mode is effective |
 | `annotation` or `sgd_annotation` | `fasta_search` |
 | `guide_design` | `crispr` |
 | `go_analysis` | `go_analysis` |
@@ -90,6 +90,20 @@ Additional mappings are required by the steps that read them:
 name to `pathway_report.html`. `database` is optional and is read only by the
 standard report generator. A pathway-only profile does not read
 `go_analysis`, `report`, or `database`.
+
+The portable configuration surface consists of five standalone templates:
+
+| File | Profile |
+| --- | --- |
+| `config/default.yaml` | Minimal de novo GO-KFI, with no supplied protein or genome |
+| `config/go_kfi_existing_protein.yaml` | Existing-protein GO-KFI without a genome |
+| `config/pw_kfi_existing_protein.yaml` | Existing-protein SGD/WikiPathways PW-KFI without a genome |
+| `config/go_kfi_existing_protein_genome.yaml` | Existing-protein GO-KFI with a genome off-target reference |
+| `config/pw_kfi_existing_protein_genome.yaml` | Existing-protein SGD/WikiPathways PW-KFI with a genome off-target reference |
+
+The no-genome profiles are limited to preliminary knockout-feasibility
+screening. The genome-backed profiles are the recommended starting point for
+any use beyond that preliminary screen.
 
 For a full orchestrated run, including `pathway_report_generation` in
 `execution.steps` also makes
@@ -102,7 +116,7 @@ For a full orchestrated run, including `pathway_report_generation` in
 | `input.transcriptome` | Required for every full run. Used in both protein input modes. |
 | `input.protein_sequences` | Optional existing protein FASTA. |
 | `input.protein_transcript_mapping` | Required by annotation modules when existing protein mode is effective. |
-| `input.genome_assembly` | Optional off-target reference; transcriptome is the fallback. |
+| `input.genome_assembly` | Runtime-optional off-target reference; transcriptome is the fallback, but that mode is limited to preliminary feasibility screening. |
 | `input.protein_db_for_goanalysis` | Required by full-run validation when `annotation`, `go_analysis`, or `report_generation` is configured. |
 | `input.sgd_db` | Required when `sgd_annotation` is configured. Also used for exact pathway cross-reference resolution. |
 
@@ -163,6 +177,36 @@ and identifiers must fully match the configured regular expression. Only
 - `report.web_port`, `pathway_report.web_port`, and
   `pathway_report.generate_html` are currently ignored. No web server is
   started.
+
+### 3.6 Docker image and dependency contract
+
+TransDecoder, BUSCO, FASTA3, and CrisFlash image tags are configuration values.
+SeqKit is not configurable: `GenePrediction.get_sequence_stats()` uses the
+hard-coded `quay.io/biocontainers/seqkit:2.8.0--h9ee0642_0` image. GO helper
+image tags are configuration values, but missing images are built from the
+repository-local contexts with plain `docker build`.
+
+The configured values are compatibility pins rather than an automatically
+updated software set. As reviewed on 2026-07-17:
+
+- BUSCO `v5.2.2_cv1` predates the current BUSCO 6.1.0 stable release;
+- SeqKit 2.8.0 predates the current upstream 2.13.0 release;
+- TransDecoder 5.7.1 remains the upstream GitHub latest release, while Bioconda
+  also publishes 6.0.0; and
+- the configured FASTA3 version remains in the current 36.3.8 release family,
+  although newer package build revisions exist.
+
+These observations do not authorize automatic replacement: BUSCO and
+TransDecoder upgrades can change datasets, output layout, or biological
+results and require representative regression analyses.
+
+`add_go_columns`, `compute_go_kfi`, and `run_alignment_and_mask` currently use
+`python:3.9-slim`; `count_go_parent_terms` uses `python:3.11-slim`. Python 3.9
+reached end of life on 2025-10-31. Base images are not digest-pinned, and most
+helper Python dependencies are unpinned or use lower bounds. Consequently, a
+later rebuild of the same local tWhEEL helper tag is not guaranteed to reproduce
+the same image contents. No minimum Docker Engine or Docker Desktop version is
+currently established by automated integration testing.
 
 ## 4. Module contracts
 
@@ -237,9 +281,11 @@ File: `src/modules/guide_design.py`
 
 Responsibilities:
 
-- copy or decompress the genome assembly, or fall back to the transcriptome;
+- copy or decompress the genome assembly for the CrisFlash `-g` off-target
+  reference, or fall back to the transcriptome;
 - convert supported IUPAC degenerate bases to `N`;
-- prepare Single sequences and validated Multi consensus sequences;
+- prepare transcriptome-derived Single sequences and validated Multi consensus
+  sequences for the CrisFlash `-s` candidate-target input;
 - run CrisFlash separately for the available Single/Multi groups;
 - retain site-specific targets; and
 - publish one normalized gene/guide generation.
@@ -265,6 +311,12 @@ CrisFlash target field four has the form
 `<sequence>/<MM0>/<MM1-2>`. A site-specific target is retained only when
 `MM0 == 1` and `MM1-2 == 0`. Other CrisFlash scores are passed through without
 a tWhEEL-enforced range.
+
+A supplied genome improves only the off-target reference. Candidate sequences
+remain transcriptome-derived and are not reconciled to genomic exon coordinates
+or splice structure. A candidate may therefore cross an exon-exon boundary or
+otherwise lack a contiguous genomic target. Experimental guide selection
+requires independent genome-coordinate and exon-structure validation.
 
 ### 4.4 `GOAnalysis`
 
@@ -353,7 +405,8 @@ Responsibilities:
 - stream immutable browser payloads under
   `web_data/report_payloads/<namespace>-<generation>/`; and
 - atomically publish `report.html` when enabled after its payload generation is
-  complete.
+  complete; and
+- display a prominent guide-design scope warning before report statistics.
 
 `report.html` is a rendering shell and does not embed the analysis payload.
 Browser data is published as classic `core.js` and `guides/*.js` scripts so the
@@ -373,6 +426,10 @@ is removed after the next successful commit.
 All external strings are context-escaped before HTML rendering. Generated data
 scripts use script-safe serialization, and dynamic report tables never place
 unescaped external strings into `innerHTML` or inline event-handler source.
+
+The HTML and text summary identify a no-genome run as preliminary-only. When a
+genome was configured, they state that it was used for off-target searching but
+that candidates remain transcriptome-derived and may cross splice junctions.
 
 QuickGO supplies missing GO labels and definitions. Native analysis tables are
 not loaded into SQLite.
@@ -394,6 +451,10 @@ Responsibilities:
 - generate `web_data/pathway_summary.json`; and
 - atomically generate one rendering shell named by
   `pathway_report.output_name` after publishing its payload generation.
+
+Because the pathway report reuses the standard report shell, it displays the
+same no-genome preliminary warning or genome-backed transcriptome-design
+limitation before its statistics.
 
 GPML labels and identifiers are escaped in generated SVG attributes and text.
 The browser validates payload-provided SVG against the report's element and
@@ -542,12 +603,19 @@ The implemented options are:
 - `--list-steps`
 - `--version`, `-v`
 
-Two metadata limitations remain in the current source:
+`src/twheel_metadata.py` is the canonical runtime metadata source. It defines
+`__version__`, the eight public step names, their workflow assignments, and their
+help summaries. The parser, `--help`, `--list-steps`, and `--step` choices all
+consume this shared definition. The current version is 1.3.1, and
+`--version` prints `tWhEEL version 1.3.1`.
 
-- `--list-steps` lists only the five GO-profile steps even though dispatch also
-  accepts `sgd_annotation` and the two pathway steps.
-- `--version` returns a hard-coded `1.0.0` that is not synchronized with Git
-  tags.
+Help, version, and step-listing requests complete before YAML or analysis-class
+imports. This keeps the CLI metadata inspectable without a fully installed
+pipeline runtime.
+
+An unknown `--step` value is rejected by `argparse` before configuration loading
+or output-directory creation. A valid single-step invocation still bypasses
+full-run input validation and never executes prerequisites automatically.
 
 ## 9. Development and extension rules
 
@@ -557,9 +625,11 @@ Two metadata limitations remain in the current source:
 - Use Python 3.12 for the documented environment.
 - Keep code comments, docstrings, configuration comments, and manuals in
   English.
+- Update `src/twheel_metadata.py` once when preparing a release, and create a
+  matching Git tag. Do not add a second hard-coded runtime version.
 - Add a module class with a `run()` method, import it in `src/twheel.py`, add an
-  explicit `run_step()` branch, add the step to CLI metadata, define its config
-  and artifact contracts, and add tests.
+  explicit `run_step()` branch, add one `StepDefinition` to the canonical CLI
+  metadata, define its config and artifact contracts, and add tests.
 - Modules are independent classes; there is no `BaseModule` abstraction.
 - Use `logging` for module progress and failures.
 - Preserve native large-result formats and publish only report inputs needed by
@@ -578,13 +648,21 @@ and remote-service end-to-end execution remains a separate integration concern.
   separate runs.
 - Execution is sequential; `execution.parallel` is unused.
 - Docker cannot be disabled through the current configuration.
-- Local helper image builds currently invoke `sudo docker build`.
+- Local helper image builds use plain `docker build` and require daemon access
+  for the invoking user; tWhEEL never invokes `sudo` itself.
 - BUSCO is forced to the `linux/amd64` platform.
+- Three helper/alignment Dockerfiles still use the end-of-life Python 3.9 base.
+- Base-image digests and helper Python dependency sets are not fully locked, so
+  rebuilding an existing helper tag is not byte-for-byte reproducible.
+- The default BUSCO and hard-coded SeqKit images are legacy compatibility pins,
+  pending explicit migration and regression testing.
 - Report snapshot fallback is tested at the generator-class level but is not a
   working public CLI restore flow after `intermediate` deletion.
-- CLI step and version metadata are stale as described above.
-- Dated configuration files reference Git-ignored `LOCAL_DATA` and are local run
-  records rather than portable examples.
+- Even genome-backed runs can contain transcriptome-derived candidate guides
+  that cross splice junctions; tWhEEL does not yet perform genomic target-site
+  reconciliation.
+- Portable configuration templates contain explicit absolute-path placeholders
+  and are not runnable until those paths and the BUSCO lineage are replaced.
 
 ## 11. External services and tools
 
@@ -602,6 +680,6 @@ and remote-service end-to-end execution remains a separate integration concern.
 ## Document information
 
 - **Status:** Current implementation reference
-- **Reviewed:** 2026-07-16
-- **Version authority:** Source behavior and Git history; the hard-coded CLI
-  version is currently stale
+- **Reviewed:** 2026-07-17
+- **Version authority:** `src/twheel_metadata.py`; release Git tags are expected
+  to match its `__version__` value

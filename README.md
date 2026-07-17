@@ -35,9 +35,10 @@ pathway workflows in separate output directories: `annotation` and
 
 The annotation implementations build a content-tagged local multi-gene
 alignment image only when the matching build context is not already available.
-GO analysis still invokes `sudo docker build` when one of its three configured
-helper images is missing. The user running tWhEEL must therefore be able to
-execute the required Docker commands in the local setup.
+GO analysis checks its three configured helper-image tags and runs a plain
+`docker build` when an image is missing or lacks a required capability label.
+tWhEEL does not invoke `sudo`; the user running it must already have access to
+the Docker daemon.
 
 ## Installation
 
@@ -61,12 +62,19 @@ docker build -t kazukinakamae/count_go_parent_terms:v1.1 \
   src/docker/count_go_parent_terms/
 ```
 
+These are tWhEEL helper compatibility tags, not claims that the image contents
+are the latest releases of every packaged dependency. For normalized gene/guide
+input, tWhEEL inspects the GO annotation and GO-KFI images for schema support
+and rebuilds an incompatible local image from the current checkout.
+
 The multi-gene alignment image is built automatically. Its local tag includes
 a hash of the Dockerfile, requirements, and alignment script, so unchanged
 runs reuse the existing image instead of rebuilding it.
 
-Other configured images (TransDecoder, BUSCO, SeqKit, FASTA3, and CrisFlash)
-are pulled by Docker on first use if they are not available locally.
+TransDecoder, BUSCO, FASTA3, and CrisFlash image tags come from the YAML
+configuration. The SeqKit image is currently hard-coded in
+`src/modules/gene_prediction.py`. Docker pulls these runtime images on first use
+when they are not available locally.
 
 Run commands from the repository root because local Docker build contexts are
 resolved from it. Runtime analysis files are mounted from the absolute
@@ -74,162 +82,161 @@ resolved from it. Runtime analysis files are mounted from the absolute
 may be outside the repository. Docker Desktop users must allow file sharing for
 an absolute output location that is not already shared with Docker.
 
-## Quick start: GO workflow
+### Docker image compatibility status
 
-Copy the standard template and edit the paths before running it. The unedited
-`config/default.yaml` cannot run because its required input paths are empty.
+The current image values are compatibility pins used by the implementation;
+they are not automatically synchronized with upstream releases. Version status
+was reviewed on 2026-07-17:
+
+| Component | Current tWhEEL value | Maintenance status |
+| --- | --- | --- |
+| TransDecoder | `5.7.1` Biocontainer | The upstream GitHub latest release remains 5.7.1, while Bioconda also publishes 6.0.0. Treat 6.0.0 as a migration candidate that requires output comparison. |
+| BUSCO | `ezlabgva/busco:v5.2.2_cv1` | Legacy compatibility pin. BUSCO 6.1.0 is the current stable release; its major-version and dataset changes require a separate regression run. |
+| SeqKit | `2.8.0` Biocontainer, hard-coded | Legacy utility pin. The upstream latest release is 2.13.0. |
+| FASTA3 | `36.3.8` Biocontainer build | The program version is still in the current 36.3.8 family, but newer Bioconda build revisions exist. |
+| CrisFlash | `kazukinakamae/crisflash:1.2.0` | Project-specific compatibility pin; upgrade only with guide-filtering and output-contract tests. |
+| GO helper images | Local tags `v1.2`, `v1.2`, and `v1.1` | Built from this checkout when missing; the tag is not an immutable dependency lock. |
+| Helper/alignment Python bases | Three `python:3.9-slim` bases and one `python:3.11-slim` base | Python 3.9 reached end of life on 2025-10-31 and should be migrated to a supported base. |
+
+See the [Python version status](https://devguide.python.org/versions/),
+[BUSCO documentation](https://busco.ezlab.org/),
+[SeqKit releases](https://github.com/shenwei356/seqkit/releases/latest),
+[TransDecoder releases](https://github.com/TransDecoder/TransDecoder/releases/latest),
+and the Bioconda recipes for
+[TransDecoder](https://bioconda.github.io/recipes/transdecoder/README.html) and
+[FASTA3](https://bioconda.github.io/recipes/fasta3/README.html).
+
+Base-image tags and most packages installed inside the helper Dockerfiles are
+not pinned by digest or an exact dependency lock. Rebuilding the same tWhEEL
+helper tag at a later date can therefore produce different image contents.
+Before treating the images as reproducible releases, migrate the Python 3.9
+bases, lock Python dependencies, optionally pin base-image digests, and run the
+unit suite plus representative Docker end-to-end analyses. Docker's
+[build best practices](https://docs.docker.com/build/building/best-practices/)
+describe the tag-versus-digest trade-off. This repository does not yet declare
+a minimum validated Docker Engine or Docker Desktop version.
+
+## Configuration templates
+
+The `config` directory contains five portable, standalone templates. Replace
+every `/absolute/path/to/...` value before running one.
+
+| Configuration | Analysis | Supplied protein | Genome assembly | Intended use |
+| --- | --- | --- | --- | --- |
+| `config/default.yaml` | GO-KFI; proteins predicted by TransDecoder | No | No | Minimal preliminary feasibility screen |
+| `config/go_kfi_existing_protein.yaml` | GO-KFI | Yes | No | Preliminary feasibility screen only |
+| `config/pw_kfi_existing_protein.yaml` | SGD/WikiPathways PW-KFI | Yes | No | Preliminary feasibility screen only |
+| `config/go_kfi_existing_protein_genome.yaml` | GO-KFI | Yes | Yes | Recommended GO-KFI profile |
+| `config/pw_kfi_existing_protein_genome.yaml` | SGD/WikiPathways PW-KFI | Yes | Yes | Recommended PW-KFI profile |
+
+`default.yaml` is the minimum configuration with neither a supplied protein
+FASTA nor a genome assembly. It predicts proteins from the transcriptome with
+TransDecoder. The other four templates use an existing protein FASTA and
+therefore require a protein-to-transcript mapping.
+
+### Genome-use policy and guide-design limitation
+
+Omitting `input.genome_assembly` is supported only for a preliminary, simple
+knockout-feasibility screen. For guide selection, experimental planning, or any
+use beyond that preliminary screen, supply a genome assembly by using one of
+the `*_genome.yaml` profiles.
+
+Supplying a genome improves the CrisFlash off-target reference; it does not
+change the source of candidate target sequences. Candidate guides are still
+generated from transcriptome-derived Single-gene sequences or Multi-gene
+consensus sequences. Some reported candidates can therefore span exon-exon
+(splice-junction) boundaries or otherwise fail to exist as one contiguous
+target in genomic DNA. Independently validate every candidate against genomic
+coordinates and exon structure before experimental use. Both GO and Pathway
+HTML reports display this limitation prominently; reports without a genome are
+also labeled as preliminary-screening output.
+
+### Quick start: minimum de novo GO-KFI profile
+
+Edit `config/default.yaml`, including the transcriptome path, UniProt-compatible
+protein database, and organism-appropriate BUSCO lineage, then run:
 
 ```bash
-cp config/default.yaml config/my_analysis.yaml
+python src/twheel.py \
+  --config config/default.yaml \
+  --name preliminary_go_screen
 ```
 
-At minimum, set:
+This creates a directory such as
+`outputs/tWhEEL_on_YYYYMMDD_HHMMSS_preliminary_go_screen/`.
+
+### Existing protein input contract
+
+The four existing-protein profiles set `skip_if_protein_provided: true` and
+require all three inputs below. The transcriptome remains the source used for
+gene-sequence extraction and guide design.
 
 ```yaml
 input:
   transcriptome: "/absolute/path/to/transcriptome.fasta"
-  protein_db_for_goanalysis: "/absolute/path/to/uniprot_sprot.fasta"
-
-output:
-  base_dir: "outputs"
-```
-
-Then run the steps listed in `execution.steps`:
-
-```bash
-python src/twheel.py \
-  --config config/my_analysis.yaml \
-  --name my_analysis
-```
-
-This creates a directory such as
-`outputs/tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis/`.
-
-### Protein database requirement
-
-`protein_db_for_goanalysis` is the implemented key; `uniprot_db` is not read by
-the pipeline. The annotation parser accepts opaque/custom FASTA identifiers,
-but the GO helper extracts a UniProtKB accession from each best-hit
-`subject_id` and queries the UniProt REST API. A complete GO workflow therefore
-requires best-hit identifiers that UniProt can resolve. A custom database with
-unresolvable identifiers may be usable for annotation alone but will not
-produce usable GO annotations.
-
-The GO annotation helper requires an active network connection at runtime. It
-tries each failed UniProt batch up to three times, then stops without
-publishing a partially annotated table. If the error says that UniProt cannot
-be reached, ensure both the host and Docker can access
-`https://rest.uniprot.org`, connect to the internet if needed, and rerun only
-`go_analysis` in the same run directory:
-
-```bash
-python src/twheel.py \
-  --config config/my_analysis.yaml \
-  --step go_analysis \
-  --name tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis
-```
-
-## Existing protein mode
-
-Provide a protein FASTA and enable `skip_if_protein_provided` to skip
-TransDecoder. The transcriptome is still required for sequence extraction and
-guide design.
-
-```yaml
-input:
-  transcriptome: "/absolute/path/to/transcripts.fasta"
   protein_sequences: "/absolute/path/to/proteins.fasta"
-  protein_transcript_mapping: "/absolute/path/to/mapping.tsv"
-  protein_db_for_goanalysis: "/absolute/path/to/uniprot_sprot.fasta"
-
-transdecoder:
-  skip_if_protein_provided: true
+  protein_transcript_mapping: "/absolute/path/to/transcript_to_protein.tsv"
 ```
 
-The mapping file is a headerless TSV. Lines beginning with `#` and blank lines
-are ignored; extra columns are ignored.
+The mapping is a headerless TSV. Lines beginning with `#` and blank lines are
+ignored; extra columns are ignored.
 
 ```text
 transcript_id<TAB>protein_id
 ```
 
 The first two columns are read in that order, and the implementation constructs
-a `protein_id -> transcript_id` lookup. Header rows are not allowed.
-
-Before a FASTA search starts, the mapping is checked against the prepared
-`intermediate/query.pep` and `intermediate/transcriptome.fa` files. Mapping
-protein IDs must exactly match all query protein IDs, and every mapped
-transcript ID must name a non-empty transcriptome FASTA record. Additional
-transcriptome records are allowed. Malformed rows, empty IDs, conflicting
-mappings for one protein ID, duplicate FASTA IDs, missing mappings, and missing
-mapped transcripts stop annotation with an error. These failures are not
-interpreted as genes without targetable guides.
+a `protein_id -> transcript_id` lookup. Header rows are not allowed. Before a
+FASTA search starts, mapping protein IDs must exactly cover the prepared
+`query.pep`, and every mapped transcript ID must identify a non-empty record in
+`transcriptome.fa`. Malformed, conflicting, incomplete, or reversed mappings
+stop annotation rather than being counted as genes without targetable guides.
 
 Existing protein mode is selected only when the configured protein file exists
-and `skip_if_protein_provided` is true (the option defaults to true when
-omitted). Otherwise, the pipeline uses TransDecoder mode. See
-`config/example_existing_protein.yaml` for a complete template.
+and `skip_if_protein_provided` is true. A missing protein file causes the shared
+input-mode resolver to select TransDecoder mode, but the existing-protein
+templates intentionally omit a TransDecoder image and must therefore be fixed
+rather than used as fallback configurations.
 
-## Pathway workflow
+### GO-KFI protein database requirement
 
-The pathway workflow replaces `annotation` with `sgd_annotation` and requires a
-local WikiPathways GPML directory. A minimal configuration outline is:
+`protein_db_for_goanalysis` is the implemented key; `uniprot_db` is not read by
+the pipeline. The annotation parser accepts opaque/custom FASTA identifiers,
+but the GO helper extracts a UniProtKB accession from each best-hit
+`subject_id` and queries the UniProt REST API. A complete GO workflow therefore
+requires best-hit identifiers that UniProt can resolve.
 
-```yaml
-input:
-  transcriptome: "/absolute/path/to/transcripts.fasta"
-  protein_sequences: "/absolute/path/to/proteins.fasta"
-  protein_transcript_mapping: "/absolute/path/to/mapping.tsv"
-  sgd_db: "/absolute/path/to/sgd_reference.fasta"
-  genome_assembly: "/absolute/path/to/genome.fasta"  # optional
+The GO annotation helper requires an active network connection at runtime. It
+tries each failed UniProt batch up to three times, then stops without publishing
+a partial table. After restoring access, rerun `go_analysis` with the same
+configuration and complete existing run name.
 
-pathway_analysis:
-  wikipathways_gpml_dir: "/absolute/path/to/gpml_directory"
-  target_gene_databases:
-    - database_name: "SGD"
-      id_pattern: "^S\\d{9}$"
-      annotation_key: "sgd_id"
-    - database_name: "Ensembl"
-      id_pattern: "^Y[A-Z]{2}\\d{3}[CW]$"
-      annotation_key: "ensembl_id"
-  minimum_pathway_coverage: 0.5
-  skip_low_coverage_pathways: true
+### PW-KFI profile scope
 
-pathway_report:
-  output_name: "pathway_report.html"
-
-execution:
-  steps:
-    - gene_prediction
-    - sgd_annotation
-    - guide_design
-    - pathway_analysis
-    - pathway_report_generation
-  verbose: true
-```
-
-`database_name` must match the GPML `Xref` database name exactly, and
-`id_pattern` is applied as a full regular-expression match. The dated pathway
-configuration in `config/input_for_PathwayAnalysis_20250917.yaml` is a local
-run record: it references `LOCAL_DATA`, which is excluded from Git and is not
-available in a fresh clone.
+The current PW-KFI implementation is an SGD/*Saccharomyces cerevisiae* profile.
+It replaces `annotation` with `sgd_annotation` and requires an SGD reference
+FASTA plus a local WikiPathways GPML directory. `database_name` must exactly
+match the GPML `Xref` database name, and `id_pattern` is applied as a full
+regular-expression match. The templates include SGD and Ensembl identifier
+contracts and explicitly retain the implemented coverage defaults of `0.5` and
+`skip_low_coverage_pathways: true`.
 
 When the SGD reference provides an exact Ensembl-to-SGD cross-reference, each
-annotation record that contains both an Ensembl ID and an explicit SGD identity
-must agree with that cross-reference. A conflicting record is quarantined from
-all pathway indexes, contributes no guide to PW-KFI, and is recorded as
-`conflicting_annotation_cross_reference` in both pathway audit artifacts. Empty
-legacy Ensembl fields and custom subjects without an explicit SGD identity
-remain supported. Pathway report generation also rejects stale mapping
-artifacts whose non-empty annotation Ensembl ID disagrees with their Ensembl
-pathway xref.
+annotation record that contains both identities must agree with it. Conflicting
+records are quarantined from pathway indexes and recorded in both pathway audit
+artifacts. Pathway report generation also rejects stale mapping artifacts whose
+annotation Ensembl ID disagrees with the pathway xref.
 
 ## Command-line usage
 
 ```bash
 python src/twheel.py --help
-python src/twheel.py --config config/my_analysis.yaml --name my_analysis
-python src/twheel.py --config config/my_analysis.yaml \
+python src/twheel.py --version
+python src/twheel.py --list-steps
+python src/twheel.py --config config/default.yaml --name my_analysis
+python src/twheel.py --config config/go_kfi_existing_protein_genome.yaml --name go_analysis
+python src/twheel.py --config config/pw_kfi_existing_protein_genome.yaml --name pathway_analysis
+python src/twheel.py --config config/default.yaml \
   --step annotation \
   --name tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis
 ```
@@ -255,10 +262,13 @@ The implemented step names and their main contracts are:
 | `report_generation` | GO workflow artifacts | `report.html`, optional `summary.txt` |
 | `pathway_report_generation` | Canonical pathway table and mapping | Configured pathway HTML report |
 
-`--step` dispatches all eight names above. The current `--list-steps` output is
-legacy CLI metadata and lists only the five standard GO-workflow steps. The
-current `--version` output is also a legacy `1.0.0` string and is not synchronized
-with the latest Git tag or commits.
+`src/twheel_metadata.py` is the single source for the release version and public
+step metadata. `--step` accepts exactly the eight names above, `--list-steps`
+prints the same names with workflow and purpose, and unknown step names are
+rejected before a configuration is loaded. `--version` currently reports
+`tWhEEL version 1.3.1`; release preparation updates `__version__` once in the
+metadata module and creates a matching Git tag. Help, version, and step-listing
+commands do not load the YAML configuration or runtime analysis modules.
 
 ## Input behavior
 
@@ -269,16 +279,19 @@ with the latest Git tag or commits.
 - The implementation does not validate a fixed FASTA extension or an ACGTN-only
   alphabet. During off-target reference preparation, supported IUPAC degenerate
   bases are converted to `N` for CrisFlash compatibility.
-- `input.genome_assembly` is optional. When absent, guide design uses the
-  transcriptome as its off-target reference and logs that this is less
-  comprehensive.
+- `input.genome_assembly` is runtime-optional, but omission is supported only
+  for preliminary knockout-feasibility screening. When absent, the
+  transcriptome is also used as the off-target reference.
+- A supplied genome is used as the off-target reference only. Guide candidate
+  sequences remain transcriptome-derived and may cross splice junctions.
 - YAML duplicate keys are rejected rather than silently overwritten.
 
 ## Configuration behavior
 
-`config/default.yaml` covers the GO workflow.
-`config/input_for_PathwayAnalysis_20250917.yaml` shows the additional pathway
-sections, but its input paths are local and must be replaced.
+`config/default.yaml` is the no-protein/no-genome minimum GO profile. The other
+four portable profiles explicitly cover existing-protein GO/PW runs with and
+without a genome. Every template uses `/absolute/path/to/...` placeholders that
+must be replaced.
 
 The following current behaviors are easy to miss:
 
@@ -414,6 +427,12 @@ HTML escaping, and generated pathway SVG is validated before insertion. These
 protections preserve the original strings in browser payloads and display them
 as text while preventing them from becoming executable HTML or JavaScript.
 
+At the top of both HTML report types, a red scope warning distinguishes a
+transcriptome-only preliminary screen from a run that supplied a genome for
+off-target searching. The genome-backed warning still states that guide
+candidates are transcriptome-derived, may span splice-junction boundaries, and
+require independent genomic and exon-structure validation.
+
 ## Result semantics
 
 ### Single and Multi classifications
@@ -497,9 +516,10 @@ empty timestamped run directory.
 
 Confirm that the daemon is running and that `docker` works for the current
 user. Multi-gene alignment uses a user-writable temporary buildx state and does
-not invoke `sudo`; GO helper-image fallback builds still use `sudo docker
-build`. Linux group-management commands such as `usermod` do not apply to
-Docker Desktop on macOS.
+not invoke `sudo`; GO helper-image fallback builds also invoke plain `docker
+build`. tWhEEL does not retry a failed build through `sudo`. On Linux, configure
+daemon access for the invoking user; Linux group-management commands such as
+`usermod` do not apply to Docker Desktop on macOS.
 
 ### Workspace lock timeout
 

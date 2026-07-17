@@ -2,42 +2,68 @@
 """
 tWhEEL - Transcriptome Workflow for Hierarchical Exploration and Expression Levels
 
-This script performs gene prediction, functional annotation, CRISPR guide design, 
-and GO functional analysis from transcriptome assembly data to identify target genes 
-for knockout experiments.
+This script runs the GO and SGD/WikiPathways analysis profiles for protein
+prediction, functional annotation, CRISPR guide design, feasibility scoring,
+and static report generation.
 """
 
 import argparse
 import sys
 import os
-import yaml
 import logging
 from pathlib import Path
 from datetime import datetime
 
-# Module imports
-from modules.gene_prediction import GenePrediction
-from modules.annotation import Annotation
-from modules.sgd_annotation import Sgd_annotation
-from modules.guide_design import GuideDesign
-from modules.go_analysis import GOAnalysis
-from modules.pathway_analysis import PathwayAnalysis
-from modules.pathway_report_generator import PathwayReportGenerator
-from modules.report_generator import ReportGenerator
 from modules.input_mode import (
     EXISTING_PROTEIN_MODE,
     determine_protein_input_mode,
     get_configured_protein_path,
 )
 from modules.multi_gene_alignment import annotation_workspace_lock
+from twheel_metadata import (
+    STEP_NAMES,
+    __version__,
+    format_step_listing,
+)
 
 
-if hasattr(yaml, 'SafeLoader'):
-    class _UniqueKeySafeLoader(yaml.SafeLoader):
+# Runtime-only imports are loaded after argument parsing so metadata commands
+# remain available before the analysis environment is installed.
+yaml = None
+_UniqueKeySafeLoader = None
+GenePrediction = None
+Annotation = None
+Sgd_annotation = None
+GuideDesign = None
+GOAnalysis = None
+PathwayAnalysis = None
+PathwayReportGenerator = None
+ReportGenerator = None
+
+
+def _ensure_yaml_loader():
+    """Return a safe YAML loader that rejects duplicate mapping keys."""
+    global yaml, _UniqueKeySafeLoader
+
+    if yaml is None:
+        try:
+            import yaml as yaml_module
+        except ModuleNotFoundError as error:
+            raise RuntimeError(
+                'PyYAML is required to load a pipeline configuration. '
+                'Install the dependencies from requirements.txt.'
+            ) from error
+        yaml = yaml_module
+
+    if _UniqueKeySafeLoader is not None:
+        return _UniqueKeySafeLoader
+    if not hasattr(yaml, 'SafeLoader'):
+        raise RuntimeError('PyYAML SafeLoader is unavailable')
+
+    class UniqueKeySafeLoader(yaml.SafeLoader):
         """Safe YAML loader that rejects duplicate mapping keys."""
 
-
-    def _construct_unique_mapping(loader, node, deep=False):
+    def construct_unique_mapping(loader, node, deep=False):
         """Construct a mapping without silently replacing earlier keys."""
         mapping = {}
         for key_node, value_node in node.value:
@@ -61,13 +87,45 @@ if hasattr(yaml, 'SafeLoader'):
             mapping[key] = loader.construct_object(value_node, deep=deep)
         return mapping
 
-
-    _UniqueKeySafeLoader.add_constructor(
+    UniqueKeySafeLoader.add_constructor(
         yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-        _construct_unique_mapping,
+        construct_unique_mapping,
     )
-else:
-    _UniqueKeySafeLoader = None
+    _UniqueKeySafeLoader = UniqueKeySafeLoader
+    return _UniqueKeySafeLoader
+
+
+def _load_runtime_modules():
+    """Load analysis classes only when a pipeline run is requested."""
+    global GenePrediction, Annotation, Sgd_annotation, GuideDesign
+    global GOAnalysis, PathwayAnalysis, PathwayReportGenerator, ReportGenerator
+
+    if GenePrediction is None:
+        from modules.gene_prediction import GenePrediction as implementation
+        GenePrediction = implementation
+    if Annotation is None:
+        from modules.annotation import Annotation as implementation
+        Annotation = implementation
+    if Sgd_annotation is None:
+        from modules.sgd_annotation import Sgd_annotation as implementation
+        Sgd_annotation = implementation
+    if GuideDesign is None:
+        from modules.guide_design import GuideDesign as implementation
+        GuideDesign = implementation
+    if GOAnalysis is None:
+        from modules.go_analysis import GOAnalysis as implementation
+        GOAnalysis = implementation
+    if PathwayAnalysis is None:
+        from modules.pathway_analysis import PathwayAnalysis as implementation
+        PathwayAnalysis = implementation
+    if PathwayReportGenerator is None:
+        from modules.pathway_report_generator import (
+            PathwayReportGenerator as implementation,
+        )
+        PathwayReportGenerator = implementation
+    if ReportGenerator is None:
+        from modules.report_generator import ReportGenerator as implementation
+        ReportGenerator = implementation
 
 
 class tWhEELPipeline:
@@ -82,6 +140,7 @@ class tWhEELPipeline:
             analysis_name (str, optional): Analysis name for output directory
         """
         self.config = self._load_config(config_path)
+        _load_runtime_modules()
         self.create_output_directory(analysis_name)
         self.setup_directories()
         self.setup_logging()
@@ -89,10 +148,9 @@ class tWhEELPipeline:
     def _load_config(self, config_path):
         """Load configuration file"""
         try:
-            if _UniqueKeySafeLoader is None:
-                raise RuntimeError('PyYAML SafeLoader is unavailable')
+            loader = _ensure_yaml_loader()
             with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.load(f, Loader=_UniqueKeySafeLoader)
+                config = yaml.load(f, Loader=loader)
             return config
         except Exception as e:
             print(f"Failed to load configuration file: {e}")
@@ -271,9 +329,16 @@ class tWhEELPipeline:
             if not os.path.exists(genome_assembly):
                 self.logger.error(f"Genome assembly file not found: {genome_assembly}")
                 return False
-            self.logger.info("Genome assembly provided - comprehensive off-target search will be performed")
+            self.logger.info(
+                "Genome assembly provided for off-target searching; guide "
+                "candidate sequences remain transcriptome-derived"
+            )
         else:
-            self.logger.warning("Genome assembly not provided. Off-target search will use transcriptome (less comprehensive)")
+            self.logger.warning(
+                "Genome assembly not provided. Off-target search will use the "
+                "transcriptome; this mode is for preliminary knockout-"
+                "feasibility screening only"
+            )
                 
         self.logger.info("Input file validation completed")
         return True
@@ -415,61 +480,103 @@ class tWhEELPipeline:
         return True
 
 
-def main():
-    """Main function"""
+def build_parser():
+    """Build the public command-line parser from canonical CLI metadata."""
+    step_listing = format_step_listing()
     parser = argparse.ArgumentParser(
-        description='tWhEEL - Transcriptome Workflow for Hierarchical Exploration and Expression Levels',
+        description=(
+            'tWhEEL - Transcriptome Workflow for Hierarchical Exploration '
+            'and Expression Levels'
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
-  python twheel.py --config config/default.yaml
-  python twheel.py --config my_config.yaml --name my_analysis
-  python twheel.py --config my_config.yaml --step annotation --name test_run
-  python twheel.py --config my_config.yaml --step annotation --name tWhEEL_on_20250719_082938_E_okinawaensis_denovoanalysis
-  python twheel.py --list-steps
+  # Run every step after editing the GO-profile template.
+  python src/twheel.py --config config/default.yaml --name my_analysis
 
-Note:
-  --name can specify either:
-    - A simple analysis name (creates new timestamped directory)
-    - A complete directory name starting with 'tWhEEL_on_' (reuses existing directory)
+  # Run every step after replacing paths in the recommended Pathway profile.
+  python src/twheel.py \\
+    --config config/pw_kfi_existing_protein_genome.yaml \\
+    --name my_pathway
+
+  # Rerun exactly one step in an existing run directory.
+  python src/twheel.py --config config/default.yaml \\
+    --step go_analysis \\
+    --name tWhEEL_on_YYYYMMDD_HHMMSS_my_analysis
+
+  python src/twheel.py --list-steps
+  python src/twheel.py --version
+
+Implemented steps:
+{step_listing}
+
+Execution behavior:
+  Without --step, entries in execution.steps run sequentially in config order.
+  --step runs only the named step; it does not run or validate prerequisites.
+  A simple --name creates a timestamped run directory. A complete name starting
+  with tWhEEL_on_ reuses that run directory but does not detect completed steps.
+
+Guide-design scope:
+  A no-genome profile is only for preliminary knockout-feasibility screening.
+  A supplied genome improves off-target searching, but candidate sequences
+  remain transcriptome-derived and may cross splice-junction boundaries.
         """
     )
     
     parser.add_argument(
         '--config', '-c',
         default='config/default.yaml',
-        help='Configuration file path (default: config/default.yaml)'
+        help=(
+            'YAML configuration file for the selected GO or Pathway profile '
+            '(default: config/default.yaml)'
+        ),
     )
     
     parser.add_argument(
         '--step', '-s',
-        help='Execute specific step (omit to run all steps)'
+        choices=STEP_NAMES,
+        metavar='STEP',
+        help=(
+            'run exactly one implemented step without running prerequisites; '
+            'omit to run execution.steps from the configuration'
+        ),
     )
     
     parser.add_argument(
         '--name', '-n',
-        help='Analysis name for output directory'
+        help=(
+            'simple run label, or a complete tWhEEL_on_... directory name to '
+            'reuse an existing run'
+        ),
     )
     
     parser.add_argument(
         '--list-steps',
         action='store_true',
-        help='List available steps'
+        help='list implemented steps with workflow and purpose, then exit',
     )
     
     parser.add_argument(
         '--version', '-v',
         action='version',
-        version='tWhEEL version 1.0.0'
+        version=f'tWhEEL version {__version__}',
+        help='show the tWhEEL release version and exit',
     )
-    
-    args = parser.parse_args()
+
+    return parser
+
+
+def main(argv=None):
+    """Run the public CLI."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
     
     if args.list_steps:
-        print("Available steps:")
-        steps = ["gene_prediction", "annotation", "guide_design", "go_analysis", "report_generation"]
-        for step in steps:
-            print(f"  - {step}")
+        print(f"tWhEEL {__version__} implemented steps:")
+        print(format_step_listing())
+        print(
+            "\nA single --step run does not execute or validate prerequisites."
+        )
         return 0
     
     # Execute pipeline

@@ -134,6 +134,58 @@ class ReportDatabaseTests(unittest.TestCase):
             },
         }
 
+    def test_report_scope_warning_distinguishes_genome_reference_mode(self):
+        scenarios = (
+            (
+                '',
+                'transcriptome_only_preliminary',
+                'Preliminary feasibility screening only',
+            ),
+            (
+                '/analysis/genome.fa',
+                'genome_off_target_reference',
+                'Critical guide-design limitation',
+            ),
+        )
+
+        for genome_path, mode, title in scenarios:
+            with self.subTest(mode=mode):
+                with tempfile.TemporaryDirectory() as temp_dir_name:
+                    config = self._config(Path(temp_dir_name))
+                    if genome_path:
+                        config['input']['genome_assembly'] = genome_path
+                    generator = ReportGenerator(config)
+                    results = self._results(config)
+
+                    html = generator._generate_html_content(
+                        results,
+                        payload_script_src=(
+                            'web_data/report_payloads/test/core.js'
+                        ),
+                    )
+                    generator._create_css_files()
+                    css = (
+                        Path(generator.output_dir)
+                        / 'static'
+                        / 'css'
+                        / 'main.css'
+                    ).read_text(encoding='utf-8')
+                    summary_path = generator.generate_text_summary(results)
+                    summary = Path(summary_path).read_text(encoding='utf-8')
+
+                marker = f'data-guide-design-scope="{mode}"'
+                self.assertEqual(html.count(marker), 1)
+                self.assertIn(title, html)
+                self.assertIn('splice-junction', html)
+                self.assertLess(
+                    html.index(marker),
+                    html.index('<!-- General Statistics Section -->'),
+                )
+                self.assertIn(title, summary)
+                self.assertIn('splice-junction', summary)
+                self.assertIn('.alert-critical', css)
+                self.assertIn('border: 2px solid #b02a37', css)
+
     @staticmethod
     def _term_info(go_ids):
         return {

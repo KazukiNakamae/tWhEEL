@@ -914,6 +914,32 @@ class PathwayReportIdentifierTests(unittest.TestCase):
                     html_content.count(f'<h2>{label}</h2>'), 1
                 )
 
+        self.assertEqual(
+            html_content.count(
+                'data-guide-design-scope="genome_off_target_reference"'
+            ),
+            1,
+        )
+        self.assertIn('Critical guide-design limitation', html_content)
+        self.assertIn('splice-junction', html_content)
+
+        self.generator.config['input']['genome_assembly'] = ''
+        preliminary_html = self.generator.create_pathway_html_template(
+            [],
+            {'pathway_guide_data': {}, 'pathway_svgs': {}, 'statistics': {}},
+            {},
+            payload_script_src='web_data/report_payloads/test/core.js',
+        )
+        self.assertEqual(
+            preliminary_html.count(
+                'data-guide-design-scope="transcriptome_only_preliminary"'
+            ),
+            1,
+        )
+        self.assertIn(
+            'Preliminary feasibility screening only', preliminary_html
+        )
+
     def test_html_shell_does_not_embed_large_pathway_payload(self):
         guide_sentinel = 'UNIQUE_GUIDE_PAYLOAD_' + ('G' * 4096)
         svg_sentinel = 'UNIQUE_SVG_PAYLOAD_' + ('S' * 4096)

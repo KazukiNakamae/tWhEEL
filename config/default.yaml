@@ -1,35 +1,25 @@
-# tWhEEL standard GO-workflow configuration template
+# Minimal de novo GO-KFI profile: no supplied protein FASTA and no genome.
+# This profile is intended only for preliminary knockout-feasibility screening.
 
 input:
-  transcriptome: ""  # Required transcript FASTA; .gz is supported
-  protein_sequences: ""  # Optional existing protein FASTA; .gz is supported
-  protein_transcript_mapping: ""  # Headerless TSV: transcript_id<TAB>protein_id
-  genome_assembly: ""  # Optional off-target FASTA; transcriptome is the fallback
-  protein_db_for_goanalysis: ""  # Protein FASTA whose best-hit IDs resolve in UniProt
+  transcriptome: "/absolute/path/to/transcriptome.fasta"
+  protein_db_for_goanalysis: "/absolute/path/to/uniprot_sprot.fasta"
 
 output:
-  base_dir: "outputs"  # Root below which a timestamped run directory is created
-  intermediate: "outputs/intermediate"  # Replaced with <run>/intermediate at startup
+  base_dir: "outputs"
 
 transdecoder:
   docker_image: "quay.io/biocontainers/transdecoder:5.7.1--pl5321hdfd78af_0"
-  min_protein_len: 100
-  skip_if_protein_provided: true
 
 busco:
   docker_image: "ezlabgva/busco:v5.2.2_cv1"
-  lineage: "metazoa_odb10"
+  lineage: "metazoa_odb10"  # Replace with the lineage for the target organism.
   cpu: 8
 
 fasta_search:
   docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
   evalue: 0.1
   threads: 8
-
-multi_gene_alignment:
-  workers: 4  # Maximum number of Multi-gene groups aligned concurrently
-  memory: "4g"  # Total memory limit for the alignment container
-  cache_enabled: true  # Reuse validated group-level consensus results
 
 crispr:
   docker_image: "kazukinakamae/crisflash:1.2.0"
@@ -46,15 +36,6 @@ go_analysis:
 report:
   generate_html: true
   generate_summary: true
-  guide_chunk_rows: 5000  # Browser payload rows per deferred guide script
-  web_port: 5000  # Legacy setting; the current pipeline generates static files only
-
-database:
-  force_rebuild: false  # Rebuild the minimal GO metadata cache when true
-
-docker:
-  max_memory: "40g"  # Legacy setting; individual modules set Docker limits directly
-  use_docker: true  # Legacy setting; Docker cannot currently be disabled
 
 execution:
   steps:
@@ -63,5 +44,4 @@ execution:
     - "guide_design"
     - "go_analysis"
     - "report_generation"
-  parallel: false  # Legacy setting; steps currently run sequentially
   verbose: true

@@ -219,6 +219,57 @@ class ReportGenerator:
     def _escape_html(value):
         """Escape external text for HTML text and quoted attributes."""
         return html.escape(str(value), quote=True)
+
+    @staticmethod
+    def _guide_design_scope_notice(config):
+        """Describe the experimental scope implied by the reference inputs."""
+        inputs = config.get('input', {}) if isinstance(config, dict) else {}
+        if not isinstance(inputs, dict):
+            inputs = {}
+        genome_value = inputs.get('genome_assembly')
+        genome_provided = bool(
+            str(genome_value).strip() if genome_value is not None else ''
+        )
+
+        if genome_provided:
+            return {
+                'mode': 'genome_off_target_reference',
+                'title': 'Critical guide-design limitation',
+                'message': (
+                    'A genome assembly was supplied for off-target screening, '
+                    'but candidate guide RNAs are still designed from '
+                    'transcriptome-derived target sequences. Some candidates '
+                    'can span exon-exon (splice-junction) boundaries or '
+                    'otherwise lack a contiguous genomic target. Independently '
+                    'validate every guide against the genome and transcript '
+                    'structure before experimental use.'
+                ),
+            }
+
+        return {
+            'mode': 'transcriptome_only_preliminary',
+            'title': 'Preliminary feasibility screening only',
+            'message': (
+                'No genome assembly was supplied, so off-target screening '
+                'uses the transcriptome. Candidate guides are also designed '
+                'from transcriptome-derived target sequences and can span '
+                'exon-exon (splice-junction) boundaries. Use this result only '
+                'for preliminary knockout-feasibility screening, not for '
+                'experimental guide selection.'
+            ),
+        }
+
+    @classmethod
+    def _guide_design_scope_warning_html(cls, results):
+        """Render the prominent guide-design scope warning for both reports."""
+        notice = cls._guide_design_scope_notice(results.get('config', {}))
+        return (
+            f'<div class="alert alert-critical" role="alert" '
+            f'data-guide-design-scope="{notice["mode"]}">'
+            f'<strong>{notice["title"]}</strong>'
+            f'<span>{notice["message"]}</span>'
+            '</div>'
+        )
         
     def collect_all_results(self):
         """Collect results from all steps"""
@@ -953,6 +1004,11 @@ class ReportGenerator:
             f.write("=" * 60 + "\n\n")
             
             f.write(f"Execution Date: {results['timestamp']}\n\n")
+
+            notice = self._guide_design_scope_notice(results['config'])
+            f.write("=== Guide Design Scope Warning ===\n")
+            f.write(f"{notice['title']}\n")
+            f.write(f"{notice['message']}\n\n")
             
             # Processing statistics - matching HTML report statistics cards
             f.write("=== Processing Statistics ===\n")
@@ -2366,6 +2422,21 @@ body {
     color: #0c5460;
     background-color: #d1ecf1;
     border-color: #bee5eb;
+}
+
+.alert-critical {
+    color: #58151c;
+    background-color: #f8d7da;
+    border: 2px solid #b02a37;
+    box-shadow: 0 0.25rem 0.75rem rgba(176, 42, 55, 0.18);
+}
+
+.alert-critical strong {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-size: 1rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
 }
 
 /* Responsive design */
@@ -5023,6 +5094,8 @@ if (typeof module !== 'undefined' && module.exports) {
             </header>
 
             <div class="content-body">
+                {self._guide_design_scope_warning_html(results)}
+
                 <!-- General Statistics Section -->
                 <section id="general-stats" class="content-section">
                     <div class="section-header">

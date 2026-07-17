@@ -1,0 +1,53 @@
+# Recommended SGD/WikiPathways PW-KFI profile with protein and genome FASTA files.
+# The genome improves off-target screening; candidate targets remain transcript-derived.
+
+input:
+  transcriptome: "/absolute/path/to/transcriptome.fasta"
+  protein_sequences: "/absolute/path/to/proteins.fasta"
+  protein_transcript_mapping: "/absolute/path/to/transcript_to_protein.tsv"
+  genome_assembly: "/absolute/path/to/genome.fasta"
+  sgd_db: "/absolute/path/to/sgd_reference.fasta"
+
+output:
+  base_dir: "outputs"
+
+transdecoder:
+  skip_if_protein_provided: true
+
+busco:
+  docker_image: "ezlabgva/busco:v5.2.2_cv1"
+  lineage: "saccharomycetes_odb10"
+  cpu: 8
+
+fasta_search:
+  docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
+  evalue: 0.1
+  threads: 8
+
+crispr:
+  docker_image: "kazukinakamae/crisflash:1.2.0"
+  pam_pattern: "NGG"
+  max_mismatch: 2
+  threads: 10
+  memory: "40g"
+
+pathway_analysis:
+  wikipathways_gpml_dir: "/absolute/path/to/wikipathways_gpml"
+  target_gene_databases:
+    - database_name: "SGD"
+      id_pattern: '^S\d{9}$'
+      annotation_key: "sgd_id"
+    - database_name: "Ensembl"
+      id_pattern: '^Y[A-Z]{2}\d{3}[CW]$'
+      annotation_key: "ensembl_id"
+  minimum_pathway_coverage: 0.5
+  skip_low_coverage_pathways: true
+
+execution:
+  steps:
+    - "gene_prediction"
+    - "sgd_annotation"
+    - "guide_design"
+    - "pathway_analysis"
+    - "pathway_report_generation"
+  verbose: true

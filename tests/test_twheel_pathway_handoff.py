@@ -25,6 +25,88 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import twheel
+import twheel_metadata
+
+
+class CliMetadataTests(unittest.TestCase):
+    def test_version_output_uses_canonical_metadata(self):
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as error_context:
+                twheel.build_parser().parse_args(['--version'])
+
+        self.assertEqual(error_context.exception.code, 0)
+        self.assertEqual(twheel.__version__, twheel_metadata.__version__)
+        self.assertEqual(
+            output.getvalue().strip(),
+            f'tWhEEL version {twheel_metadata.__version__}',
+        )
+
+    def test_help_and_step_choices_cover_all_implemented_steps(self):
+        expected_steps = (
+            'gene_prediction',
+            'annotation',
+            'sgd_annotation',
+            'guide_design',
+            'go_analysis',
+            'pathway_analysis',
+            'report_generation',
+            'pathway_report_generation',
+        )
+        parser = twheel.build_parser()
+        step_action = next(
+            action for action in parser._actions if action.dest == 'step'
+        )
+
+        self.assertEqual(twheel_metadata.STEP_NAMES, expected_steps)
+        self.assertEqual(tuple(step_action.choices), expected_steps)
+        help_text = parser.format_help()
+        for step_name in expected_steps:
+            self.assertIn(step_name, help_text)
+        self.assertIn(
+            'config/pw_kfi_existing_protein_genome.yaml', help_text
+        )
+        self.assertIn('does not run or validate prerequisites', help_text)
+        self.assertIn('preliminary knockout-feasibility', help_text)
+        self.assertIn('splice-junction boundaries', help_text)
+
+    def test_list_steps_uses_shared_descriptions_without_loading_config(self):
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            return_code = twheel.main(['--list-steps'])
+
+        self.assertEqual(return_code, 0)
+        listing = output.getvalue()
+        self.assertIn(f'tWhEEL {twheel_metadata.__version__}', listing)
+        for step in twheel_metadata.STEP_DEFINITIONS:
+            self.assertIn(step.name, listing)
+            self.assertIn(step.workflow, listing)
+            self.assertIn(step.summary, listing)
+        self.assertIn('does not execute or validate prerequisites', listing)
+
+    def test_help_exits_without_initializing_pipeline(self):
+        output = io.StringIO()
+
+        with patch.object(twheel, 'tWhEELPipeline') as pipeline_class:
+            with contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit) as error_context:
+                    twheel.main(['--help'])
+
+        self.assertEqual(error_context.exception.code, 0)
+        pipeline_class.assert_not_called()
+        self.assertIn('Implemented steps:', output.getvalue())
+
+    def test_unknown_step_is_rejected_by_argument_parser(self):
+        error_output = io.StringIO()
+
+        with contextlib.redirect_stderr(error_output):
+            with self.assertRaises(SystemExit) as error_context:
+                twheel.build_parser().parse_args(['--step', 'unknown_step'])
+
+        self.assertEqual(error_context.exception.code, 2)
+        self.assertIn('invalid choice', error_output.getvalue())
 
 
 @unittest.skipUnless(
@@ -32,6 +114,28 @@ import twheel
     'PyYAML is required for configuration loader tests',
 )
 class StrictYamlConfigTests(unittest.TestCase):
+    EXPECTED_CONFIG_FILES = {
+        'default.yaml',
+        'go_kfi_existing_protein.yaml',
+        'pw_kfi_existing_protein.yaml',
+        'go_kfi_existing_protein_genome.yaml',
+        'pw_kfi_existing_protein_genome.yaml',
+    }
+    GO_STEPS = [
+        'gene_prediction',
+        'annotation',
+        'guide_design',
+        'go_analysis',
+        'report_generation',
+    ]
+    PATHWAY_STEPS = [
+        'gene_prediction',
+        'sgd_annotation',
+        'guide_design',
+        'pathway_analysis',
+        'pathway_report_generation',
+    ]
+
     def setUp(self):
         self.temp_dir_context = tempfile.TemporaryDirectory()
         self.temp_dir = Path(self.temp_dir_context.name)
@@ -72,24 +176,76 @@ class StrictYamlConfigTests(unittest.TestCase):
             'force_rebuild',
         )
 
-    def test_denovo_config_keeps_force_rebuild_enabled(self):
-        config_path = (
-            Path(__file__).resolve().parents[1]
-            / 'config'
-            / 'input_for_denovotranscriptomeassembly_GOAnalysis_20250718.yaml'
-        )
-
-        config = self.pipeline._load_config(config_path)
-
-        self.assertIs(config['database']['force_rebuild'], True)
-
     def test_repository_configs_have_no_duplicate_keys(self):
         config_dir = Path(__file__).resolve().parents[1] / 'config'
+        config_paths = sorted(config_dir.glob('*.yaml'))
 
-        for config_path in sorted(config_dir.glob('*.yaml')):
+        self.assertEqual(
+            {path.name for path in config_paths},
+            self.EXPECTED_CONFIG_FILES,
+        )
+
+        for config_path in config_paths:
             with self.subTest(config_path=config_path.name):
                 config = self.pipeline._load_config(config_path)
                 self.assertIsInstance(config, dict)
+
+    def test_repository_configs_match_the_five_supported_profiles(self):
+        config_dir = Path(__file__).resolve().parents[1] / 'config'
+        scenarios = {
+            'default.yaml': (False, False, self.GO_STEPS),
+            'go_kfi_existing_protein.yaml': (
+                True, False, self.GO_STEPS,
+            ),
+            'pw_kfi_existing_protein.yaml': (
+                True, False, self.PATHWAY_STEPS,
+            ),
+            'go_kfi_existing_protein_genome.yaml': (
+                True, True, self.GO_STEPS,
+            ),
+            'pw_kfi_existing_protein_genome.yaml': (
+                True, True, self.PATHWAY_STEPS,
+            ),
+        }
+
+        for filename, (has_protein, has_genome, steps) in scenarios.items():
+            with self.subTest(config=filename):
+                config = self.pipeline._load_config(config_dir / filename)
+                inputs = config['input']
+
+                self.assertEqual(
+                    bool(inputs.get('protein_sequences')), has_protein
+                )
+                self.assertEqual(
+                    bool(inputs.get('genome_assembly')), has_genome
+                )
+                self.assertEqual(config['execution']['steps'], steps)
+                self.assertNotIn('intermediate', config['output'])
+                self.assertNotIn('docker', config)
+                self.assertNotIn('parallel', config['execution'])
+                self.assertNotIn('LOCAL_DATA', repr(config))
+
+                if has_protein:
+                    self.assertTrue(inputs['protein_transcript_mapping'])
+                    self.assertIs(
+                        config['transdecoder']['skip_if_protein_provided'],
+                        True,
+                    )
+                    self.assertNotIn('docker_image', config['transdecoder'])
+                else:
+                    self.assertNotIn('protein_transcript_mapping', inputs)
+                    self.assertTrue(config['transdecoder']['docker_image'])
+
+                if steps == self.GO_STEPS:
+                    self.assertTrue(inputs['protein_db_for_goanalysis'])
+                    self.assertIn('go_analysis', config)
+                    self.assertIn('report', config)
+                    self.assertNotIn('pathway_analysis', config)
+                else:
+                    self.assertTrue(inputs['sgd_db'])
+                    self.assertIn('pathway_analysis', config)
+                    self.assertNotIn('go_analysis', config)
+                    self.assertNotIn('report', config)
 
 
 class OutputDirectoryConfigTests(unittest.TestCase):
@@ -170,11 +326,12 @@ class OptionalGenomeAssemblyConfigTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir_context.cleanup()
 
-    def test_validate_inputs_accepts_omitted_genome_assembly(self):
+    def test_validate_inputs_accepts_preliminary_no_genome_profile(self):
         self.assertTrue(self.pipeline.validate_inputs())
         self.pipeline.logger.warning.assert_called_once_with(
-            "Genome assembly not provided. Off-target search will use "
-            "transcriptome (less comprehensive)"
+            "Genome assembly not provided. Off-target search will use the "
+            "transcriptome; this mode is for preliminary knockout-"
+            "feasibility screening only"
         )
 
 

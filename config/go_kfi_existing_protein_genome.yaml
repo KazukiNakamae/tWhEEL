@@ -1,0 +1,50 @@
+# Recommended GO-KFI profile with supplied protein and genome FASTA files.
+# The genome improves off-target screening; candidate targets remain transcript-derived.
+
+input:
+  transcriptome: "/absolute/path/to/transcriptome.fasta"
+  protein_sequences: "/absolute/path/to/proteins.fasta"
+  protein_transcript_mapping: "/absolute/path/to/transcript_to_protein.tsv"
+  genome_assembly: "/absolute/path/to/genome.fasta"
+  protein_db_for_goanalysis: "/absolute/path/to/uniprot_sprot.fasta"
+
+output:
+  base_dir: "outputs"
+
+transdecoder:
+  skip_if_protein_provided: true
+
+busco:
+  docker_image: "ezlabgva/busco:v5.2.2_cv1"
+  lineage: "metazoa_odb10"  # Replace with the lineage for the target organism.
+  cpu: 8
+
+fasta_search:
+  docker_image: "quay.io/biocontainers/fasta3:36.3.8--h470a237_4"
+  evalue: 0.1
+  threads: 8
+
+crispr:
+  docker_image: "kazukinakamae/crisflash:1.2.0"
+  pam_pattern: "NGG"
+  max_mismatch: 2
+  threads: 10
+  memory: "40g"
+
+go_analysis:
+  add_go_image: "kazukinakamae/add-go-columns:v1.2"
+  compute_kfi_image: "kazukinakamae/compute_go_kfi:v1.2"
+  count_parent_image: "kazukinakamae/count_go_parent_terms:v1.1"
+
+report:
+  generate_html: true
+  generate_summary: true
+
+execution:
+  steps:
+    - "gene_prediction"
+    - "annotation"
+    - "guide_design"
+    - "go_analysis"
+    - "report_generation"
+  verbose: true

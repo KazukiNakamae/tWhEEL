@@ -303,7 +303,7 @@ class SiteSpecificTargetTests(unittest.TestCase):
 
             self.assertEqual(set(prepared_files), {'single_genes'})
 
-    def test_missing_optional_genome_assembly_uses_transcriptome(self):
+    def test_preliminary_no_genome_profile_uses_transcriptome_reference(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             transcriptome_path = temp_path / 'transcriptome.fa'
@@ -320,6 +320,32 @@ class SiteSpecificTargetTests(unittest.TestCase):
             self.assertEqual(
                 Path(output_path).read_text(encoding='utf-8'),
                 '>tx1\nACGTNN\n',
+            )
+
+    def test_supplied_genome_is_used_as_off_target_reference(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            transcriptome_path = temp_path / 'transcriptome.fa'
+            genome_path = temp_path / 'genome.fa'
+            transcriptome_path.write_text(
+                '>tx1\nAAAA\n', encoding='utf-8'
+            )
+            genome_path.write_text(
+                '>chr1\nACGTRY\n', encoding='utf-8'
+            )
+            guide_design = GuideDesign({
+                'input': {
+                    'transcriptome': str(transcriptome_path),
+                    'genome_assembly': str(genome_path),
+                },
+                'output': {'intermediate': temp_dir},
+            })
+
+            output_path = guide_design.prepare_genome_assembly()
+
+            self.assertEqual(
+                Path(output_path).read_text(encoding='utf-8'),
+                '>chr1\nACGTNN\n',
             )
 
     def test_site_specific_target_requires_exact_mismatch_counts(self):
