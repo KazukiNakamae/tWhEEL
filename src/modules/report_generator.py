@@ -238,7 +238,9 @@ class ReportGenerator:
         if genome_provided:
             return {
                 'mode': 'genome_off_target_reference',
-                'title': 'Genome-backed target-locus validation required',
+                'severity': 'info',
+                'role': 'note',
+                'title': 'Genome-backed target-locus validation',
                 'message': (
                     'A genome assembly was supplied as the CrisFlash '
                     'off-target reference. CrisFlash searches reference '
@@ -258,6 +260,8 @@ class ReportGenerator:
 
         return {
             'mode': 'transcriptome_only_preliminary',
+            'severity': 'critical',
+            'role': 'alert',
             'title': 'Preliminary feasibility screening only',
             'message': (
                 'No genome assembly was supplied, so CrisFlash searches a '
@@ -275,13 +279,14 @@ class ReportGenerator:
 
     @classmethod
     def _guide_design_scope_warning_html(cls, results):
-        """Render the prominent guide-design scope warning for both reports."""
+        """Render a severity-aware guide-design scope notice."""
         notice = cls._guide_design_scope_notice(results.get('config', {}))
         return (
-            f'<div class="alert alert-critical" role="alert" '
+            f'<div class="alert alert-{notice["severity"]}" '
+            f'role="{notice["role"]}" '
             f'data-guide-design-scope="{notice["mode"]}">'
             f'<strong>{notice["title"]}</strong>'
-            f'<span>{notice["message"]}</span>'
+            f' <span>{notice["message"]}</span>'
             '</div>'
         )
         
@@ -1020,7 +1025,12 @@ class ReportGenerator:
             f.write(f"Execution Date: {results['timestamp']}\n\n")
 
             notice = self._guide_design_scope_notice(results['config'])
-            f.write("=== Guide Design Scope Warning ===\n")
+            scope_label = (
+                'Information'
+                if notice['severity'] == 'info'
+                else 'Warning'
+            )
+            f.write(f"=== Guide Design Scope {scope_label} ===\n")
             f.write(f"{notice['title']}\n")
             f.write(f"{notice['message']}\n\n")
             

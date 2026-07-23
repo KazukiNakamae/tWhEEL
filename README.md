@@ -523,13 +523,14 @@ HTML escaping, and generated pathway SVG is validated before insertion. These
 protections preserve the original strings in browser payloads and display them
 as text while preventing them from becoming executable HTML or JavaScript.
 
-At the top of both HTML report types, a red scope warning distinguishes a
+At the top of both HTML report types, a scope notice distinguishes a
 transcriptome-only preliminary screen from a run that supplied a genome for
-off-target searching. The genome-backed warning states that `MM0 == 0`
-candidates are excluded from normalized results, while retained `MM0 == 1`
-candidates still require intended-locus and GFF/GTF exon-context validation.
-The no-genome warning explains that a transcriptome match does not establish a
-contiguous genomic target and that splice-junction candidates can remain.
+off-target searching. Genome-backed runs use a subdued informational notice:
+`MM0 == 0` candidates are excluded from normalized results, while retained
+`MM0 == 1` candidates still require intended-locus and GFF/GTF exon-context
+validation. The no-genome case remains a prominent warning because a
+transcriptome match does not establish a contiguous genomic target and
+splice-junction candidates can remain.
 
 ## Result semantics
 

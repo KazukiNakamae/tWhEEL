@@ -139,6 +139,9 @@ class ReportDatabaseTests(unittest.TestCase):
             (
                 '',
                 'transcriptome_only_preliminary',
+                'critical',
+                'alert',
+                'Warning',
                 'Preliminary feasibility screening only',
                 (
                     'splice-junction',
@@ -149,7 +152,10 @@ class ReportDatabaseTests(unittest.TestCase):
             (
                 '/analysis/genome.fa',
                 'genome_off_target_reference',
-                'Genome-backed target-locus validation required',
+                'info',
+                'note',
+                'Information',
+                'Genome-backed target-locus validation',
                 (
                     'up to 2 mismatches',
                     'MM0=0',
@@ -161,7 +167,15 @@ class ReportDatabaseTests(unittest.TestCase):
             ),
         )
 
-        for genome_path, mode, title, expected_phrases in scenarios:
+        for (
+            genome_path,
+            mode,
+            severity,
+            role,
+            summary_label,
+            title,
+            expected_phrases,
+        ) in scenarios:
             with self.subTest(mode=mode):
                 with tempfile.TemporaryDirectory() as temp_dir_name:
                     config = self._config(Path(temp_dir_name))
@@ -188,6 +202,11 @@ class ReportDatabaseTests(unittest.TestCase):
 
                 marker = f'data-guide-design-scope="{mode}"'
                 self.assertEqual(html.count(marker), 1)
+                self.assertIn(
+                    f'<div class="alert alert-{severity}" role="{role}" '
+                    f'{marker}>',
+                    html,
+                )
                 self.assertIn(title, html)
                 for expected_phrase in expected_phrases:
                     self.assertIn(expected_phrase, html)
@@ -196,6 +215,9 @@ class ReportDatabaseTests(unittest.TestCase):
                     html.index('<!-- General Statistics Section -->'),
                 )
                 self.assertIn(title, summary)
+                self.assertIn(
+                    f'=== Guide Design Scope {summary_label} ===', summary
+                )
                 for expected_phrase in expected_phrases:
                     self.assertIn(expected_phrase, summary)
                 self.assertIn(
@@ -214,6 +236,8 @@ class ReportDatabaseTests(unittest.TestCase):
                     )
                 self.assertIn('.alert-critical', css)
                 self.assertIn('border: 2px solid #b02a37', css)
+                self.assertIn('.alert-info', css)
+                self.assertIn('border-color: #bee5eb', css)
 
     @staticmethod
     def _term_info(go_ids):

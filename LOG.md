@@ -9,6 +9,9 @@ match its `__version__` value.
 
 ## Unreleased (current `main` after v1.3.2)
 
+- Changed the genome-backed target-locus report notice from a prominent red
+  warning to a subdued informational notice while retaining the critical red
+  warning for transcriptome-only preliminary screening.
 - Corrected the expanded project name to “transcript-aware Whole-genomic
   Evaluation for Editing Locus (tWhEEL)” in the README, CLI help, and generated
   GO and pathway report headers, and placed the existing logo at the top of the

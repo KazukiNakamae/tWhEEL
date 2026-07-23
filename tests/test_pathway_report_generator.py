@@ -920,7 +920,12 @@ class PathwayReportIdentifierTests(unittest.TestCase):
             1,
         )
         self.assertIn(
-            'Genome-backed target-locus validation required', html_content
+            'Genome-backed target-locus validation', html_content
+        )
+        self.assertIn(
+            '<div class="alert alert-info" role="note" '
+            'data-guide-design-scope="genome_off_target_reference">',
+            html_content,
         )
         self.assertIn('MM0=0', html_content)
         self.assertIn('MM0=1', html_content)
@@ -943,6 +948,11 @@ class PathwayReportIdentifierTests(unittest.TestCase):
                 'data-guide-design-scope="transcriptome_only_preliminary"'
             ),
             1,
+        )
+        self.assertIn(
+            '<div class="alert alert-critical" role="alert" '
+            'data-guide-design-scope="transcriptome_only_preliminary">',
+            preliminary_html,
         )
         self.assertIn(
             'Preliminary feasibility screening only', preliminary_html
