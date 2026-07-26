@@ -134,22 +134,34 @@ record. Additional transcript FASTA records are allowed. Any mapping format or
 identifier inconsistency stops annotation before the similarity search.
 
 The optional `src/docker/create_tx2protein_mapping` helper constructs this TSV
-from provider-matched GFF3, transcript/cDNA FASTA, and protein/peptide FASTA
-files. It is restricted to RefSeq CDS `Parent=rna-*` plus `protein_id`, and
-Ensembl CDS `Parent=transcript:*` plus `protein_id`; it does not attempt generic
-GFF3 inference. Inputs may be plain text or gzip-compressed. The streaming
-standard-library implementation detects or verifies the provider, deduplicates
-multi-exon CDS pairs, reconciles only unique trailing-version differences, and
-emits the exact FASTA first-token identifiers in deterministic order.
+from provider-matched annotation and sequence files. The default
+`--refseq-transcript-source gff3` mode is restricted to RefSeq CDS
+`Parent=rna-*` plus `protein_id`, and Ensembl CDS `Parent=transcript:*` plus
+`protein_id`; it does not attempt generic GFF3 inference. The RefSeq-only
+`cds-fasta` mode obtains transcript-protein pairs from the first-token record ID
+and exactly one `[protein_id=...]` field in each NCBI `cds_from_genomic.fna`
+header. It retains the matching GFF3 as a required source-verification input,
+skips and audits CDS FASTA records without a protein ID, and rejects records
+with multiple or empty protein-ID fields. Inputs may be plain text or
+gzip-compressed. The streaming standard-library implementation detects or
+verifies the provider, deduplicates multi-exon CDS pairs, reconciles only unique
+trailing-version differences, and emits the exact FASTA first-token identifiers
+in deterministic order.
 
 RefSeq `--refseq-xp include|exclude` controls predicted XP proteins. The
 default is `include`. `--unmapped-proteins error|exclude` defaults to `error`;
 explicit exclusion is required for provider proteins that have no transcript
-FASTA record. Either exclusion policy publishes a matched protein FASTA that
-must be used with the generated mapping. Ambiguous mappings always fail. The
-mapping and optional filtered FASTA are prepared before atomic replacement,
-and a bounded audit JSON records source scores, skipped CDS rows, normalization,
-exclusions, problems, and final counts. Existing outputs require `--force`.
+FASTA record. `--unresolved-transcripts error|exclude` also defaults to `error`.
+Its explicit `exclude` policy removes only GFF3 transcript candidates absent
+from the transcript FASTA while retaining a protein's uniquely resolved
+mapping; ambiguous identifiers, conflicting explicit versions, and multiple
+resolved transcripts remain fatal. Either protein exclusion policy publishes a
+matched protein FASTA that must be used with the generated mapping. A run that
+would retain no proteins or emit no rows is fatal. The mapping and optional
+filtered FASTA are prepared before atomic replacement, and a bounded audit JSON
+records all selected policies, source scores, skipped CDS rows and CDS FASTA
+headers, normalization, exclusions, problems, and final counts. Existing
+outputs require `--force`.
 
 ### 3.3 Effective protein input mode
 

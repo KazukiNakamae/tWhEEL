@@ -213,10 +213,13 @@ rather than used as fallback configurations.
 #### Creating `tx2protein.tsv` from RefSeq or Ensembl
 
 The optional `create_tx2protein_mapping` helper creates and validates the
-mapping from a matching GFF3 annotation, transcript/cDNA FASTA, and
-protein/peptide FASTA. It is intentionally limited to the standard RefSeq and
-Ensembl-style CDS attributes described below; it is not a universal GFF3
-converter. Use three files from the same provider release and assembly.
+mapping from provider-matched annotation and sequence files. Its default
+`--refseq-transcript-source gff3` mode uses a GFF3 annotation, transcript/cDNA
+FASTA, and protein/peptide FASTA. The RefSeq-only `cds-fasta` mode instead uses
+the first-token identifiers and `[protein_id=...]` fields in an NCBI
+`cds_from_genomic.fna` file, while retaining the matching GFF3 for provider
+detection and validation. The helper is not a universal GFF3 or FASTA-header
+converter. Use files from the same provider release and assembly.
 
 - RefSeq CDS rows are linked through `Parent=rna-...` and `protein_id=...`.
 - Ensembl CDS rows are linked through `Parent=transcript:...` and
@@ -227,6 +230,8 @@ converter. Use three files from the same provider release and assembly.
 - Exact identifiers are preferred. A missing trailing numeric version is
   reconciled only when it identifies exactly one FASTA record, and the emitted
   TSV always uses the actual FASTA identifiers.
+- RefSeq CDS FASTA records without a `[protein_id=...]` field are skipped and
+  counted in the audit. Multiple protein-ID fields in one header are rejected.
 
 Build the dependency-free Python 3.12 helper image once:
 
@@ -247,7 +252,9 @@ docker run --rm \
   --mount type=bind,src="/absolute/path/to/refseq",dst=/data \
   twheel-create-tx2protein:local \
   --source refseq \
+  --refseq-transcript-source gff3 \
   --refseq-xp include \
+  --unresolved-transcripts exclude \
   --unmapped-proteins exclude \
   --annotation /data/annotation.gff3.gz \
   --transcripts /data/rna.fna.gz \
@@ -256,12 +263,40 @@ docker run --rm \
   --filtered-proteins /data/refseq_matched_proteins.faa
 ```
 
+The default `--unresolved-transcripts error` policy rejects any GFF3
+transcript candidate absent from the transcript FASTA. Selecting `exclude`
+explicitly excludes only absent candidates and records them in the audit. It
+does not relax ambiguous or conflicting-version identifiers, and a protein
+linked to more than one resolved transcript still fails.
+
 To omit predicted RefSeq XP proteins, change only
-`--refseq-xp include` to `--refseq-xp exclude`. In both exclusion modes, point
-`input.protein_sequences` to the generated `refseq_matched_proteins.faa`, not
-the original provider protein FASTA, and point
+`--refseq-xp include` to `--refseq-xp exclude`. Whenever either protein
+exclusion policy is selected (`--refseq-xp exclude` or
+`--unmapped-proteins exclude`), point `input.protein_sequences` to the generated
+`refseq_matched_proteins.faa`, not the original provider protein FASTA, and point
 `input.protein_transcript_mapping` to `refseq_tx2protein.tsv`. This preserves
 the exact protein-coverage contract enforced by tWhEEL.
+
+NCBI prokaryotic `rna_from_genomic.fna` files can omit protein-coding
+transcripts. For such a release, use its CDS nucleotide FASTA as the tWhEEL
+transcriptome and select the RefSeq CDS-header mode:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="/absolute/path/to/refseq",dst=/data \
+  twheel-create-tx2protein:local \
+  --source refseq \
+  --refseq-transcript-source cds-fasta \
+  --annotation /data/annotation.gff3.gz \
+  --transcripts /data/cds_from_genomic.fna.gz \
+  --proteins /data/protein.faa.gz \
+  --output /data/refseq_tx2protein.tsv
+```
+
+In this mode, configure `input.transcriptome` with the same CDS nucleotide
+FASTA. The GFF3 is used to verify that the release is RefSeq; transcript-protein
+pairs come only from the CDS FASTA headers.
 
 For matching [Ensembl FTP](https://www.ensembl.org/info/data/ftp/index.html)
 GFF3, cDNA, and peptide files, use strict mode by omitting the exclusion
@@ -284,8 +319,9 @@ mapping if any supplied protein cannot be resolved. Selecting `exclude` is an
 explicit request to remove those proteins and creates a matched protein FASTA.
 Ambiguous protein-to-transcript relationships always fail. Every run writes an
 audit JSON beside the TSV (`<output>.audit.json`) with source detection,
-candidate, exclusion, normalization, and output counts. Existing outputs are
-not replaced unless `--force` is supplied.
+input-mode, candidate, exclusion, normalization, and output counts. A run that
+would select no proteins or emit no mappings fails without publishing empty
+outputs. Existing outputs are not replaced unless `--force` is supplied.
 
 ### GO-KFI protein database requirement
 

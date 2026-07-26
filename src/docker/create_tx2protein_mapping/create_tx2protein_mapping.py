@@ -15,6 +15,7 @@ from urllib.parse import unquote
 
 AUDIT_SCHEMA_VERSION = 1
 VERSION_SUFFIX_RE = re.compile(r"\.\d+$")
+REFSEQ_CDS_PROTEIN_ID_RE = re.compile(r"\[protein_id=([^\]]*)\]")
 TRANSCRIPT_PREFIXES = ("transcript:", "rna-", "mRNA:", "RNA:")
 PROTEIN_PREFIXES = ("protein:", "cds-", "CDS:")
 
@@ -265,6 +266,70 @@ def _ensembl_header_pairs(protein_headers):
     return pairs
 
 
+def _refseq_cds_header_pairs(transcript_headers, max_examples):
+    pairs = set()
+    missing_protein_ids = []
+    multiple_protein_ids = []
+    empty_protein_ids = []
+    for transcript_id, header in transcript_headers.items():
+        raw_protein_ids = REFSEQ_CDS_PROTEIN_ID_RE.findall(header)
+        if not raw_protein_ids:
+            missing_protein_ids.append(transcript_id)
+            continue
+        if len(raw_protein_ids) > 1:
+            multiple_protein_ids.append(
+                f"{transcript_id}->{'|'.join(raw_protein_ids)}"
+            )
+            continue
+        protein_id = _clean_protein_id(raw_protein_ids[0])
+        if not protein_id:
+            empty_protein_ids.append(transcript_id)
+            continue
+        pairs.add((transcript_id, protein_id))
+
+    counts = {
+        "refseq_cds_fasta_candidate_pairs": len(pairs),
+        "refseq_cds_fasta_records_without_protein_id": len(
+            missing_protein_ids
+        ),
+        "refseq_cds_fasta_records_with_multiple_protein_ids": len(
+            multiple_protein_ids
+        ),
+        "refseq_cds_fasta_records_with_empty_protein_id": len(
+            empty_protein_ids
+        ),
+    }
+    examples = {
+        "refseq_cds_fasta_records_without_protein_id": _bounded(
+            missing_protein_ids, max_examples
+        ),
+        "refseq_cds_fasta_records_with_multiple_protein_ids": _bounded(
+            multiple_protein_ids, max_examples
+        ),
+        "refseq_cds_fasta_records_with_empty_protein_id": _bounded(
+            empty_protein_ids, max_examples
+        ),
+    }
+    problems = []
+    if multiple_protein_ids:
+        problems.append(
+            _problem(
+                "multiple_protein_ids_in_refseq_cds_fasta_header",
+                multiple_protein_ids,
+                max_examples,
+            )
+        )
+    if empty_protein_ids:
+        problems.append(
+            _problem(
+                "empty_protein_id_in_refseq_cds_fasta_header",
+                empty_protein_ids,
+                max_examples,
+            )
+        )
+    return pairs, counts, examples, problems
+
+
 def _bounded(values, limit):
     values = list(values)
     return values[:limit]
@@ -286,6 +351,8 @@ def _make_audit(args, audit_path, filtered_protein_path):
         "source_requested": args.source,
         "source_detected": None,
         "refseq_xp": args.refseq_xp,
+        "refseq_transcript_source": args.refseq_transcript_source,
+        "unresolved_transcripts": args.unresolved_transcripts,
         "unmapped_proteins": args.unmapped_proteins,
         "inputs": {
             "gff3": os.path.abspath(args.annotation),
@@ -351,8 +418,29 @@ def _build_mapping(args, audit):
             }
         )
         return None, None
+    if args.refseq_transcript_source == "cds-fasta" and source != "refseq":
+        audit["problems"].append(
+            {
+                "code": "refseq_cds_fasta_option_requires_refseq",
+                "count": 1,
+                "examples": [f"detected source: {source}"],
+            }
+        )
+        return None, None
 
-    if source == "ensembl":
+    header_examples = {}
+    if args.refseq_transcript_source == "cds-fasta":
+        (
+            raw_pairs,
+            header_counts,
+            header_examples,
+            header_problems,
+        ) = _refseq_cds_header_pairs(
+            transcript_headers, args.max_examples
+        )
+        audit["counts"].update(header_counts)
+        audit["problems"].extend(header_problems)
+    elif source == "ensembl":
         header_pairs = _ensembl_header_pairs(protein_headers)
         raw_pairs.update(header_pairs)
         audit["counts"]["ensembl_protein_header_pairs"] = len(header_pairs)
@@ -433,6 +521,17 @@ def _build_mapping(args, audit):
         excluded_unmapped = missing_proteins
         selected_protein_ids -= set(excluded_unmapped)
         missing_proteins = []
+    if not selected_protein_ids:
+        audit["problems"].append(
+            {
+                "code": "no_selected_proteins",
+                "count": 1,
+                "examples": [
+                    "No protein remains after applying the XP and unmapped "
+                    "protein policies"
+                ],
+            }
+        )
     if missing_proteins:
         audit["problems"].append(
             _problem("unmapped_proteins", missing_proteins, args.max_examples)
@@ -488,7 +587,13 @@ def _build_mapping(args, audit):
         for protein_id, raw_transcript, mode in unresolved_transcripts
         if protein_id in selected_protein_ids
     )
-    if unresolved_selected:
+    excluded_unresolved_transcripts = []
+    if args.unresolved_transcripts == "exclude":
+        excluded_unresolved_transcripts = sorted(
+            f"{protein_id}->{raw_transcript} ({mode})"
+            for protein_id, raw_transcript, mode in unresolved_transcripts
+        )
+    elif unresolved_selected:
         audit["problems"].append(
             _problem(
                 "unresolved_transcript_ids",
@@ -510,6 +615,9 @@ def _build_mapping(args, audit):
             ),
             "mapped_proteins": len(mappings),
             "excluded_unmapped_proteins": len(excluded_unmapped),
+            "excluded_unresolved_transcript_pairs": len(
+                excluded_unresolved_transcripts
+            ),
             "selected_protein_records": len(selected_protein_ids),
             "mapped_transcripts": len(
                 {transcript for values in mappings.values() for transcript in values}
@@ -521,10 +629,14 @@ def _build_mapping(args, audit):
         "excluded_unmapped_proteins": _bounded(
             excluded_unmapped, args.max_examples
         ),
+        "excluded_unresolved_transcript_pairs": _bounded(
+            excluded_unresolved_transcripts, args.max_examples
+        ),
         "annotation_protein_ids_absent_from_input": _bounded(
             sorted(absent_annotation_proteins), args.max_examples
         ),
     }
+    audit["examples"].update(header_examples)
     if audit["problems"]:
         return None, selected_protein_ids
 
@@ -532,6 +644,15 @@ def _build_mapping(args, audit):
         (next(iter(transcript_ids)), protein_id)
         for protein_id, transcript_ids in mappings.items()
     )
+    if not rows:
+        audit["problems"].append(
+            {
+                "code": "no_output_mappings",
+                "count": 1,
+                "examples": ["No transcript-protein mapping can be emitted"],
+            }
+        )
+        return None, selected_protein_ids
     return rows, selected_protein_ids
 
 
@@ -651,8 +772,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description=(
             "Create a headerless transcript_id<TAB>protein_id mapping from "
-            "matching RefSeq or Ensembl GFF3, transcript FASTA, and protein "
-            "FASTA files."
+            "matching RefSeq or Ensembl annotation and sequence files."
         )
     )
     parser.add_argument(
@@ -664,7 +784,10 @@ def build_parser():
     parser.add_argument(
         "--transcripts",
         required=True,
-        help="Transcript/cDNA FASTA (.gz is supported)",
+        help=(
+            "Transcript/cDNA FASTA, or an NCBI cds_from_genomic nucleotide "
+            "FASTA in RefSeq CDS-header mode (.gz is supported)"
+        ),
     )
     parser.add_argument(
         "--proteins",
@@ -692,11 +815,31 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--refseq-transcript-source",
+        choices=("gff3", "cds-fasta"),
+        default="gff3",
+        help=(
+            "Obtain RefSeq transcript-protein links from GFF3 CDS attributes, "
+            "or from [protein_id=...] fields in an NCBI cds_from_genomic "
+            "FASTA supplied with --transcripts (default: gff3)"
+        ),
+    )
+    parser.add_argument(
+        "--unresolved-transcripts",
+        choices=("error", "exclude"),
+        default="error",
+        help=(
+            "Fail on GFF3 transcript candidates absent from the transcript "
+            "FASTA, or explicitly exclude only those candidates while "
+            "retaining uniquely resolved mappings (default: error)"
+        ),
+    )
+    parser.add_argument(
         "--filtered-proteins",
         help=(
             "Output path for the protein FASTA matching the generated map; "
-            "valid when either exclusion policy is selected (default: "
-            "<mapping stem>.matched.faa)"
+            "valid with --refseq-xp exclude or --unmapped-proteins exclude "
+            "(default: <mapping stem>.matched.faa)"
         ),
     )
     parser.add_argument(
