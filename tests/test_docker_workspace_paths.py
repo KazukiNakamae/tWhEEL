@@ -163,10 +163,20 @@ class AbsoluteOutputDockerCommandTests(unittest.TestCase):
         }
         genome_path = self.intermediate_dir / 'reference_for_offtarget.fa'
         gene_path = self.intermediate_dir / 'single_genes.fa'
+        gene_path.write_text('>Single_1\nACGT\n', encoding='utf-8')
+        (self.intermediate_dir / 'single_genes_targets.bed').touch()
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "[crisflash] 0 gRNA sequences discovered in 'Single_1'."
+            ),
+            stderr='',
+        )
 
         with mock.patch(
             'src.modules.guide_design.subprocess.run',
-            return_value=self.completed,
+            return_value=completed,
         ) as run_mock:
             GuideDesign(config).run_crisflash(
                 str(genome_path), str(gene_path), 'single_genes'

@@ -140,7 +140,7 @@ class SiteSpecificTargetTests(unittest.TestCase):
             aligned_dir = intermediate / 'multi_genes_aligned'
             aligned_dir.mkdir()
             for multi_id, sequence in (
-                ('Multi_1', 'ACGT'), ('Multi_2', 'TGCA')
+                ('Multi_1', 'ACGTRYKMSWBDHV'), ('Multi_2', 'TGCA')
             ):
                 (aligned_dir / f'{multi_id}_aligned_consensus.fa').write_text(
                     f'>{multi_id} consensus sequence\n{sequence}\n',
@@ -155,9 +155,125 @@ class SiteSpecificTargetTests(unittest.TestCase):
             combined_path = Path(prepared_files['multi_genes'])
             self.assertEqual(
                 combined_path.read_text(encoding='utf-8'),
-                '>Multi_1_aligned_consensus\nACGT\n'
+                '>Multi_1_aligned_consensus\nACGTNNNNNNNNNN\n'
                 '>Multi_2_aligned_consensus\nTGCA\n',
             )
+
+    def test_crisflash_exit_zero_with_embedded_error_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            gene_path = intermediate / 'multi_genes_aligned_oneline.fa'
+            gene_path.write_text(
+                '>Multi_1_aligned_consensus\nACGT\n', encoding='utf-8'
+            )
+            (intermediate / 'multi_genes_targets.bed').touch()
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+                'crispr': {
+                    'memory': '1g',
+                    'threads': 1,
+                    'docker_image': 'example/crisflash:test',
+                    'pam_pattern': 'NGG',
+                },
+            })
+            completed = mock.Mock(
+                returncode=0,
+                stdout='',
+                stderr="[crisflash] ERROR: 'K' not valid DNA base symbol!",
+            )
+
+            with mock.patch(
+                'src.modules.guide_design.subprocess.run',
+                return_value=completed,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, 'reported an error.*not valid DNA base'
+                ):
+                    guide_design.run_crisflash(
+                        str(intermediate / 'reference.fa'),
+                        str(gene_path),
+                        'multi_genes',
+                    )
+
+    def test_crisflash_missing_source_record_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            gene_path = intermediate / 'multi_genes_aligned_oneline.fa'
+            gene_path.write_text(
+                '>Multi_1_aligned_consensus\nACGT\n'
+                '>Multi_2_aligned_consensus\nTGCA\n',
+                encoding='utf-8',
+            )
+            (intermediate / 'multi_genes_targets.bed').touch()
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+                'crispr': {
+                    'memory': '1g',
+                    'threads': 1,
+                    'docker_image': 'example/crisflash:test',
+                    'pam_pattern': 'NGG',
+                },
+            })
+            completed = mock.Mock(
+                returncode=0,
+                stdout='',
+                stderr=(
+                    "[crisflash] 1 gRNA sequences discovered in "
+                    "'Multi_1_aligned_consensus'."
+                ),
+            )
+
+            with mock.patch(
+                'src.modules.guide_design.subprocess.run',
+                return_value=completed,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, 'missing 1/2.*Multi_2_aligned_consensus'
+                ):
+                    guide_design.run_crisflash(
+                        str(intermediate / 'reference.fa'),
+                        str(gene_path),
+                        'multi_genes',
+                    )
+
+    def test_crisflash_complete_source_scan_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intermediate = Path(temp_dir)
+            gene_path = intermediate / 'single_genes.fa'
+            gene_path.write_text(
+                '>Single_1\nACGT\n>Single_2\nTGCA\n', encoding='utf-8'
+            )
+            output_path = intermediate / 'single_genes_targets.bed'
+            output_path.touch()
+            guide_design = GuideDesign({
+                'output': {'intermediate': temp_dir},
+                'crispr': {
+                    'memory': '1g',
+                    'threads': 1,
+                    'docker_image': 'example/crisflash:test',
+                    'pam_pattern': 'NGG',
+                },
+            })
+            completed = mock.Mock(
+                returncode=0,
+                stdout=(
+                    "[crisflash] 0 gRNA sequences discovered in 'Single_1'.\n"
+                    "[crisflash] 2 gRNA sequences discovered in 'Single_2'."
+                ),
+                stderr='',
+            )
+
+            with mock.patch(
+                'src.modules.guide_design.subprocess.run',
+                return_value=completed,
+            ):
+                observed = guide_design.run_crisflash(
+                    str(intermediate / 'reference.fa'),
+                    str(gene_path),
+                    'single_genes',
+                )
+
+            self.assertEqual(observed, str(output_path))
 
     def test_empty_consensus_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

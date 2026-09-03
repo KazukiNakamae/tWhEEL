@@ -7,7 +7,14 @@ Version dates below are taken from Git tags. `src/twheel_metadata.py` is the
 single source for the runtime release version, and release tags are expected to
 match its `__version__` value.
 
-## Unreleased (current `main` after v1.3.2)
+## Unreleased (v1.3.4 release candidate)
+
+- Converted supported IUPAC ambiguity codes to `N` in aligned Multi consensus
+  guide-source FASTA files before CrisFlash execution.
+- Added fail-closed CrisFlash validation for embedded error messages, complete
+  source-record scanning, and BED output creation.
+- Added a checksum-verified publication benchmark restart plan from
+  `guide_design` for the twelve in-scope GO/PW analyses.
 
 - Changed the genome-backed target-locus report notice from a prominent red
   warning to a subdued informational notice while retaining the critical red

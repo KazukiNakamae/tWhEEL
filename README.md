@@ -391,7 +391,7 @@ The implemented step names and their main contracts are:
 step metadata. `--step` accepts exactly the eight names above, `--list-steps`
 prints the same names with workflow and purpose, and unknown step names are
 rejected before a configuration is loaded. `--version` currently reports
-`tWhEEL version 1.3.2`; release preparation updates `__version__` once in the
+`tWhEEL version 1.3.4`; release preparation updates `__version__` once in the
 metadata module and creates a matching Git tag. Help, version, and step-listing
 commands do not load the YAML configuration or runtime analysis modules.
 
@@ -401,9 +401,13 @@ commands do not load the YAML configuration or runtime analysis modules.
   input modes.
 - Transcriptome, protein, genome, and annotation database inputs may be plain
   FASTA or gzip-compressed FASTA; format handling is based on a `.gz` suffix.
-- The implementation does not validate a fixed FASTA extension or an ACGTN-only
-  alphabet. During off-target reference preparation, supported IUPAC degenerate
-  bases are converted to `N` for CrisFlash compatibility.
+- The implementation does not validate a fixed FASTA extension. During
+  off-target reference and guide-source preparation, supported IUPAC degenerate
+  bases in genome, transcript, Single, and aligned Multi sequences are converted
+  to `N` for CrisFlash compatibility.
+- A CrisFlash run is accepted only after every guide-source FASTA record appears
+  in its completion output. Embedded CrisFlash errors therefore fail the step
+  even if the container process exits with status 0.
 - `input.genome_assembly` is runtime-optional, but omission is supported only
   for preliminary knockout-feasibility screening. When absent, the
   transcriptome is also used as the off-target reference.
