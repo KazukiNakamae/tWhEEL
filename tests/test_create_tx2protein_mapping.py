@@ -229,6 +229,7 @@ class CreateTx2ProteinMappingTests(unittest.TestCase):
 
             status, _, stderr = self._run(
                 [
+                    "--unresolved-transcripts", "exclude",
                     "--annotation", gff,
                     "--transcripts", transcripts,
                     "--proteins", proteins,
@@ -244,6 +245,271 @@ class CreateTx2ProteinMappingTests(unittest.TestCase):
             )
             self.assertIn(
                 "ambiguous_protein_mappings",
+                {problem["code"] for problem in audit["problems"]},
+            )
+
+    def test_unresolved_transcript_candidate_fails_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gff = root / "annotation.gff3"
+            transcripts = root / "rna.fa"
+            proteins = root / "protein.fa"
+            output = root / "tx2protein.tsv"
+            self._write(
+                gff,
+                "##gff-version 3\n#!processor NCBI annotwriter\n"
+                "chr1\tRefSeq\tCDS\t1\t9\t.\t+\t0\t"
+                "Parent=rna-NM_1.1;protein_id=NP_1.1\n"
+                "chr1\tRefSeq\tCDS\t20\t30\t.\t+\t0\t"
+                "Parent=rna-NM_1.1-2;protein_id=NP_1.1\n",
+            )
+            self._write(transcripts, ">NM_1.1\nATG\n")
+            self._write(proteins, ">NP_1.1\nM\n")
+
+            status, _, _ = self._run(
+                [
+                    "--annotation", gff,
+                    "--transcripts", transcripts,
+                    "--proteins", proteins,
+                    "--output", output,
+                ]
+            )
+
+            self.assertEqual(2, status)
+            self.assertFalse(output.exists())
+            audit = json.loads(
+                Path(f"{output}.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("error", audit["unresolved_transcripts"])
+            self.assertIn(
+                "unresolved_transcript_ids",
+                {problem["code"] for problem in audit["problems"]},
+            )
+
+    def test_unresolved_transcript_candidate_can_be_explicitly_excluded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gff = root / "annotation.gff3"
+            transcripts = root / "rna.fa"
+            proteins = root / "protein.fa"
+            output = root / "tx2protein.tsv"
+            self._write(
+                gff,
+                "##gff-version 3\n#!processor NCBI annotwriter\n"
+                "chr1\tRefSeq\tCDS\t1\t9\t.\t+\t0\t"
+                "Parent=rna-NM_1.1;protein_id=NP_1.1\n"
+                "chr1\tRefSeq\tCDS\t20\t30\t.\t+\t0\t"
+                "Parent=rna-NM_1.1-2;protein_id=NP_1.1\n",
+            )
+            self._write(transcripts, ">NM_1.1\nATG\n")
+            self._write(proteins, ">NP_1.1\nM\n")
+
+            status, _, stderr = self._run(
+                [
+                    "--unresolved-transcripts", "exclude",
+                    "--annotation", gff,
+                    "--transcripts", transcripts,
+                    "--proteins", proteins,
+                    "--output", output,
+                ]
+            )
+
+            self.assertEqual(0, status, stderr)
+            self.assertEqual(
+                "NM_1.1\tNP_1.1\n",
+                output.read_text(encoding="utf-8"),
+            )
+            audit = json.loads(
+                Path(f"{output}.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("exclude", audit["unresolved_transcripts"])
+            self.assertEqual(
+                1,
+                audit["counts"]["excluded_unresolved_transcript_pairs"],
+            )
+            self.assertEqual(
+                ["NP_1.1->NM_1.1-2 (absent)"],
+                audit["examples"]["excluded_unresolved_transcript_pairs"],
+            )
+
+    def test_refseq_cds_fasta_headers_create_mapping_and_audit_skips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gff = root / "annotation.gff3"
+            cds = root / "cds_from_genomic.fna"
+            proteins = root / "protein.faa"
+            output = root / "tx2protein.tsv"
+            self._write(
+                gff,
+                "##gff-version 3\n#!processor NCBI annotwriter\n"
+                "chr1\tRefSeq\tCDS\t1\t9\t.\t+\t0\t"
+                "Parent=gene-b0001;protein_id=NP_1.1\n",
+            )
+            self._write(
+                cds,
+                ">lcl|chr1_cds_NP_1.1_1 [protein_id=NP_1.1] [gbkey=CDS]\n"
+                "ATG\n"
+                ">lcl|chr1_cds_pseudo_2 [pseudo=true] [gbkey=CDS]\n"
+                "ATG\n",
+            )
+            self._write(proteins, ">NP_1.1\nM\n")
+
+            status, _, stderr = self._run(
+                [
+                    "--source", "refseq",
+                    "--refseq-transcript-source", "cds-fasta",
+                    "--annotation", gff,
+                    "--transcripts", cds,
+                    "--proteins", proteins,
+                    "--output", output,
+                ]
+            )
+
+            self.assertEqual(0, status, stderr)
+            self.assertEqual(
+                "lcl|chr1_cds_NP_1.1_1\tNP_1.1\n",
+                output.read_text(encoding="utf-8"),
+            )
+            audit = json.loads(
+                Path(f"{output}.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("cds-fasta", audit["refseq_transcript_source"])
+            self.assertEqual(
+                1, audit["counts"]["refseq_cds_fasta_candidate_pairs"]
+            )
+            self.assertEqual(
+                1,
+                audit["counts"][
+                    "refseq_cds_fasta_records_without_protein_id"
+                ],
+            )
+            self.assertEqual(
+                ["lcl|chr1_cds_pseudo_2"],
+                audit["examples"][
+                    "refseq_cds_fasta_records_without_protein_id"
+                ],
+            )
+            mapping = TRANSCRIPT_MAPPING.load_mapping_file(output)
+            validation = TRANSCRIPT_MAPPING.validate_mapping_against_fastas(
+                mapping, proteins, cds
+            )
+            self.assertEqual(1, validation["protein_count"])
+
+    def test_refseq_cds_fasta_multiple_protein_ids_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gff = root / "annotation.gff3"
+            cds = root / "cds_from_genomic.fna"
+            proteins = root / "protein.faa"
+            output = root / "tx2protein.tsv"
+            self._write(
+                gff,
+                "##gff-version 3\n#!processor NCBI annotwriter\n"
+                "chr1\tRefSeq\tCDS\t1\t9\t.\t+\t0\t"
+                "Parent=gene-b0001;protein_id=NP_1.1\n",
+            )
+            self._write(
+                cds,
+                ">lcl|chr1_cds_1 [protein_id=NP_1.1] "
+                "[protein_id=NP_2.1]\nATG\n",
+            )
+            self._write(proteins, ">NP_1.1\nM\n")
+
+            status, _, _ = self._run(
+                [
+                    "--source", "refseq",
+                    "--refseq-transcript-source", "cds-fasta",
+                    "--unmapped-proteins", "exclude",
+                    "--annotation", gff,
+                    "--transcripts", cds,
+                    "--proteins", proteins,
+                    "--output", output,
+                ]
+            )
+
+            self.assertEqual(2, status)
+            self.assertFalse(output.exists())
+            audit = json.loads(
+                Path(f"{output}.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "multiple_protein_ids_in_refseq_cds_fasta_header",
+                {problem["code"] for problem in audit["problems"]},
+            )
+
+    def test_refseq_cds_fasta_mode_rejects_ensembl_annotation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gff = root / "annotation.gff3"
+            cds = root / "cds.fa"
+            proteins = root / "protein.fa"
+            output = root / "tx2protein.tsv"
+            self._write(
+                gff,
+                "##gff-version 3\n"
+                "chr1\tensembl\tCDS\t1\t9\t.\t+\t0\t"
+                "Parent=transcript:ENST1;protein_id=ENSP1\n",
+            )
+            self._write(cds, ">ENST1 [protein_id=ENSP1]\nATG\n")
+            self._write(proteins, ">ENSP1\nM\n")
+
+            status, _, _ = self._run(
+                [
+                    "--source", "ensembl",
+                    "--refseq-transcript-source", "cds-fasta",
+                    "--annotation", gff,
+                    "--transcripts", cds,
+                    "--proteins", proteins,
+                    "--output", output,
+                ]
+            )
+
+            self.assertEqual(2, status)
+            self.assertFalse(output.exists())
+            audit = json.loads(
+                Path(f"{output}.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "refseq_cds_fasta_option_requires_refseq",
+                audit["problems"][0]["code"],
+            )
+
+    def test_excluding_all_unmapped_proteins_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gff = root / "annotation.gff3"
+            transcripts = root / "rna.fa"
+            proteins = root / "protein.fa"
+            output = root / "tx2protein.tsv"
+            self._write(
+                gff,
+                "##gff-version 3\n#!processor NCBI annotwriter\n"
+                "chr1\tRefSeq\tCDS\t1\t9\t.\t+\t0\t"
+                "Parent=rna-NM_missing.1;protein_id=NP_1.1\n",
+            )
+            self._write(transcripts, ">NM_other.1\nATG\n")
+            self._write(proteins, ">NP_1.1\nM\n")
+
+            status, _, _ = self._run(
+                [
+                    "--unresolved-transcripts", "exclude",
+                    "--unmapped-proteins", "exclude",
+                    "--annotation", gff,
+                    "--transcripts", transcripts,
+                    "--proteins", proteins,
+                    "--output", output,
+                ]
+            )
+
+            self.assertEqual(2, status)
+            self.assertFalse(output.exists())
+            audit = json.loads(
+                Path(f"{output}.audit.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("error", audit["status"])
+            self.assertEqual(0, audit["counts"]["selected_protein_records"])
+            self.assertIn(
+                "no_selected_proteins",
                 {problem["code"] for problem in audit["problems"]},
             )
 

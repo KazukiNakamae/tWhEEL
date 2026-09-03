@@ -6,6 +6,7 @@
 LOCAL_DATA
 # Output directory
 outputs/tWhEEL_*
+outputs/benchmarking/
 # transdecoder
 transcriptome.fa.transdecoder_dir
 transcriptome.fa.transdecoder.bed

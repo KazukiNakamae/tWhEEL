@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 # Update this value once when preparing a release. Runtime version reporting,
 # documentation, and release-tag checks must refer back to this definition.
-__version__ = "1.3.2"
+__version__ = "1.3.4"
 
 
 @dataclass(frozen=True)

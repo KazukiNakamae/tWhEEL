@@ -8,6 +8,7 @@ import os
 import subprocess
 import logging
 import gzip
+import re
 import shutil
 
 from .docker_workspace import DockerWorkspace
@@ -161,6 +162,79 @@ class GuideDesign:
             self.logger.info(f"Degenerate base conversion complete: {conversion_count}/{total_bases} bases ({conversion_rate:.2f}%) converted to N")
         else:
             self.logger.info("No degenerate bases were found.")
+
+    @staticmethod
+    def _fasta_record_ids(fasta_path):
+        """Return unique first-token identifiers from a FASTA file."""
+        path = Path(fasta_path)
+        record_ids = set()
+        with path.open('r', encoding='utf-8') as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.startswith('>'):
+                    continue
+                header = line[1:].strip()
+                record_id = header.split(maxsplit=1)[0] if header else ''
+                if not record_id:
+                    raise ValueError(
+                        f"Invalid FASTA identifier at {path}:{line_number}"
+                    )
+                if record_id in record_ids:
+                    raise RuntimeError(
+                        "Duplicate FASTA identifier at "
+                        f"{path}:{line_number}: {record_id}"
+                    )
+                record_ids.add(record_id)
+        if not record_ids:
+            raise RuntimeError(f"No FASTA records were found: {path}")
+        return record_ids
+
+    @staticmethod
+    def _crisflash_discovered_ids(output_text):
+        """Extract first-token FASTA IDs reported as scanned by CrisFlash."""
+        discovered_ids = set()
+        pattern = re.compile(
+            r"gRNA sequences discovered in '([^']+)'", re.IGNORECASE
+        )
+        for match in pattern.finditer(output_text or ''):
+            header = match.group(1).strip()
+            if header:
+                discovered_ids.add(header.split(maxsplit=1)[0])
+        return discovered_ids
+
+    def _validate_crisflash_completion(self, result, gene_path, gene_type):
+        """Reject embedded CrisFlash errors and incomplete source scans."""
+        combined_output = '\n'.join(
+            text for text in (result.stdout, result.stderr) if text
+        )
+        error_match = re.search(
+            r"(?im)^\s*\[crisflash\]\s+ERROR:\s*(.+)$",
+            combined_output,
+        )
+        if error_match:
+            detail = error_match.group(1).strip()
+            raise RuntimeError(
+                f"CrisFlash reported an error for {gene_type}: {detail}"
+            )
+
+        expected_ids = self._fasta_record_ids(gene_path)
+        discovered_ids = self._crisflash_discovered_ids(combined_output)
+        missing_ids = sorted(expected_ids - discovered_ids)
+        if missing_ids:
+            preview = ','.join(missing_ids[:10])
+            suffix = '' if len(missing_ids) <= 10 else ',...'
+            raise RuntimeError(
+                "CrisFlash did not report scanning every source record for "
+                f"{gene_type}: missing {len(missing_ids)}/{len(expected_ids)} "
+                f"record(s): {preview}{suffix}"
+            )
+
+        self.logger.info(
+            "CrisFlash completion check passed for %s: %d/%d source "
+            "records scanned.",
+            gene_type,
+            len(expected_ids),
+            len(expected_ids),
+        )
     
     @staticmethod
     def _multi_gene_ids_from_fasta(multi_genes_path):
@@ -517,6 +591,11 @@ class GuideDesign:
             multi_genes_oneline_path = self._prepare_multi_genes_aligned(
                 multi_genes_aligned_dir, expected_multi_ids
             )
+
+            # Alignment consensus sequences may contain IUPAC ambiguity codes.
+            # CrisFlash accepts N but can stop early on other ambiguous bases.
+            self._clean_degenerate_bases(multi_genes_oneline_path)
+
             prepared_files['multi_genes'] = multi_genes_oneline_path
             self.logger.info(
                 "Prepare a file with multi-gene alignment.: "
@@ -578,6 +657,17 @@ class GuideDesign:
         if result.returncode != 0:
             self.logger.error(f"CrisFlash execution error: {result.stderr}")
             raise RuntimeError(f"CrisFlash execution failed. ({gene_type})")
+
+        try:
+            self._validate_crisflash_completion(result, gene_path, gene_type)
+        except RuntimeError as exc:
+            self.logger.error(str(exc))
+            raise
+
+        if not os.path.isfile(output_path):
+            raise RuntimeError(
+                f"CrisFlash did not create its BED output. ({gene_type})"
+            )
         
         self.logger.info(f"Guide target design for {gene_type} is complete.: {output_path}")
         
