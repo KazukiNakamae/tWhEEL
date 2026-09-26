@@ -7,7 +7,22 @@ Version dates below are taken from Git tags. `src/twheel_metadata.py` is the
 single source for the runtime release version, and release tags are expected to
 match its `__version__` value.
 
-## Unreleased (v1.3.4 release candidate)
+## v1.3.5 (2026-09-27)
+
+- Corrected GO-KFI chart labels to use exact category counts instead of
+  reconstructing S and M from percentages rounded to one decimal place.
+- Derived bar widths from exact counts so rounding neither removes nonzero
+  categories nor produces a stacked total above or below 100%.
+- Retained support for exact counts in older report payloads, added explicit
+  errors for missing or inconsistent chart counts, and handled empty data.
+- Corrected the GO chart's row label from `Contigs` to `GO terms`.
+- Added generated-JavaScript regression tests covering all eleven publication
+  GO statistics, small categories, empty data, and invalid or legacy payloads.
+- Left GO-KFI calculation, guide filtering, and pathway analysis unchanged.
+  Existing analyses need only report regeneration, with the original reports
+  preserved and the analysis and renderer versions recorded separately.
+
+## v1.3.4
 
 - Converted supported IUPAC ambiguity codes to `N` in aligned Multi consensus
   guide-source FASTA files before CrisFlash execution.

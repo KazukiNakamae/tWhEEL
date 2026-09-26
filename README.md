@@ -391,9 +391,26 @@ The implemented step names and their main contracts are:
 step metadata. `--step` accepts exactly the eight names above, `--list-steps`
 prints the same names with workflow and purpose, and unknown step names are
 rejected before a configuration is loaded. `--version` currently reports
-`tWhEEL version 1.3.4`; release preparation updates `__version__` once in the
+`tWhEEL version 1.3.5`; release preparation updates `__version__` once in the
 metadata module and creates a matching Git tag. Help, version, and step-listing
 commands do not load the YAML configuration or runtime analysis modules.
+
+### GO report count correction in v1.3.5
+
+GO-KFI charts use exact F, S, M, P, N, and total counts from the analysis
+statistics. Earlier reports reconstructed S and M from rounded percentages,
+which could make the displayed counts disagree with the underlying tables.
+Bar geometry now uses unrounded count ratios; percentage labels still use one
+decimal place. Missing or inconsistent counts produce an explicit chart error
+instead of an estimated count. Existing payloads with exact top-level counts
+remain supported.
+
+The correction does not change GO-KFI calculation or guide selection. Preserve
+the original report bundle before using `--step report_generation` with the
+matching configuration and retained prerequisites. Report regeneration rewrites
+report artifacts; verify output paths before running it on a copied workspace.
+Record the original analysis version and the updated report-renderer version
+separately. A full biological-analysis rerun is not required for this fix.
 
 ## Input behavior
 
