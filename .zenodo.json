@@ -1,0 +1,38 @@
+{
+  "title": "tWhEEL: transcript-aware Whole-genomic Evaluation for Editing Locus",
+  "version": "1.3.5",
+  "doi": "10.5281/zenodo.23660613",
+  "publication_date": "2026-10-26",
+  "upload_type": "software",
+  "description": "<p>tWhEEL is a Docker-oriented pipeline for transcriptome-based protein prediction, similarity-based annotation, SpCas9 guide design, and function-level knockout feasibility assessment. It provides a Gene Ontology (GO-KFI) workflow and an SGD-centered pathway (PW-KFI) workflow.</p><p>Version 1.3.5 corrects GO-KFI report labels and stacked-bar geometry to use exact category counts rather than counts reconstructed from rounded percentages. It also detects missing or inconsistent chart counts and corrects the row label to GO terms. GO-KFI calculation, guide filtering, and pathway analysis are unchanged by this release.</p><p>This archive contains the tracked source tree at tag v1.3.5, commit 77d7a7c9aa14ef1d5fc8e709293ab86999226d8a (tag/source date: 2026-09-27). It does not bundle Docker images, reference databases, LOCAL_DATA, or untracked analysis outputs. Previously tracked Python bytecode and test-report assets are retained to preserve the original tagged tree.</p><p>KFI describes guide-design feasibility, not measured experimental editing efficiency or proven loss of biological function. Genome-backed searches still require intended-locus and exon-context validation. External dependencies and online annotation services are not frozen by this source archive.</p>",
+  "creators": [
+    {
+      "name": "Nakamae, Kazuki",
+      "affiliation": "Genome Editing Innovation Center, Hiroshima University, Higashi-Hiroshima, 739-0046, Japan",
+      "orcid": "0000-0002-4469-664X"
+    },
+    {
+      "name": "Bono, Hidemasa",
+      "affiliation": "Genome Editing Innovation Center, Hiroshima University, Higashi-Hiroshima, 739-0046, Japan; Graduate School of Integrated Sciences for Life, Hiroshima University, Higashi-Hiroshima, 739-0046, Japan",
+      "orcid": "0000-0003-4413-0651"
+    }
+  ],
+  "license": "mit",
+  "access_right": "open",
+  "keywords": [
+    "transcriptomics",
+    "CRISPR-Cas9",
+    "guide RNA design",
+    "knockout feasibility",
+    "Gene Ontology",
+    "WikiPathways"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/KazukiNakamae/tWhEEL/commit/77d7a7c9aa14ef1d5fc8e709293ab86999226d8a",
+      "relation": "isIdenticalTo",
+      "resource_type": "software"
+    }
+  ],
+  "language": "eng"
+}

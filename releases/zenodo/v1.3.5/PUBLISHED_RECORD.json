@@ -1,0 +1,267 @@
+{
+  "access": {
+    "embargo": {
+      "active": false,
+      "reason": null
+    },
+    "files": "public",
+    "record": "public",
+    "status": "open"
+  },
+  "created": "2026-10-26T08:35:04.365471+00:00",
+  "custom_fields": {
+    "code:codeRepository": "https://github.com/KazukiNakamae/tWhEEL/tree/v1.3.5"
+  },
+  "deletion_status": {
+    "is_deleted": false,
+    "status": "P"
+  },
+  "files": {
+    "count": 1,
+    "enabled": true,
+    "entries": {
+      "tWhEEL-1.3.5-source.zip": {
+        "access": {
+          "hidden": false
+        },
+        "checksum": "md5:aa82a0112de31104a5a6adf08446d1fd",
+        "ext": "zip",
+        "id": "508be9eb-9151-4126-907d-05a093d28c2d",
+        "key": "tWhEEL-1.3.5-source.zip",
+        "links": {
+          "container": "https://zenodo.org/api/records/23660613/files/tWhEEL-1.3.5-source.zip/container",
+          "content": "https://zenodo.org/api/records/23660613/files/tWhEEL-1.3.5-source.zip/content",
+          "self": "https://zenodo.org/api/records/23660613/files/tWhEEL-1.3.5-source.zip"
+        },
+        "metadata": {},
+        "mimetype": "application/zip",
+        "size": 1038561,
+        "storage_class": "L"
+      }
+    },
+    "order": [],
+    "total_bytes": 1038561
+  },
+  "id": "23660613",
+  "is_draft": false,
+  "is_published": true,
+  "links": {
+    "access": "https://zenodo.org/api/records/23660613/access",
+    "access_grants": "https://zenodo.org/api/records/23660613/access/grants",
+    "access_links": "https://zenodo.org/api/records/23660613/access/links",
+    "access_request": "https://zenodo.org/api/records/23660613/access/request",
+    "access_users": "https://zenodo.org/api/records/23660613/access/users",
+    "communities": "https://zenodo.org/api/records/23660613/communities",
+    "communities-suggestions": "https://zenodo.org/api/records/23660613/communities-suggestions",
+    "doi": "https://doi.org/10.5281/zenodo.23660613",
+    "draft": "https://zenodo.org/api/records/23660613/draft",
+    "file_modification": "https://zenodo.org/api/records/23660613/file-modification",
+    "files": "https://zenodo.org/api/records/23660613/files",
+    "latest": "https://zenodo.org/api/records/23660613/versions/latest",
+    "latest_html": "https://zenodo.org/records/23660613/latest",
+    "media_files": "https://zenodo.org/api/records/23660613/media-files",
+    "parent": "https://zenodo.org/api/records/23660612",
+    "parent_doi": "https://doi.org/10.5281/zenodo.23660612",
+    "parent_doi_html": "https://zenodo.org/doi/10.5281/zenodo.23660612",
+    "parent_html": "https://zenodo.org/records/23660612",
+    "preview_html": "https://zenodo.org/records/23660613?preview=1",
+    "quota_increase": "https://zenodo.org/api/records/23660613/quota-increase",
+    "request_deletion": "https://zenodo.org/api/records/23660613/request-deletion",
+    "requests": "https://zenodo.org/api/records/23660613/requests",
+    "reserve_doi": "https://zenodo.org/api/records/23660613/draft/pids/doi",
+    "self": "https://zenodo.org/api/records/23660613",
+    "self_doi": "https://doi.org/10.5281/zenodo.23660613",
+    "self_doi_html": "https://zenodo.org/doi/10.5281/zenodo.23660613",
+    "self_html": "https://zenodo.org/records/23660613",
+    "self_iiif_manifest": "https://zenodo.org/api/iiif/record:23660613/manifest",
+    "self_iiif_sequence": "https://zenodo.org/api/iiif/record:23660613/sequence/default",
+    "versions": "https://zenodo.org/api/records/23660613/versions"
+  },
+  "media_files": {
+    "count": 0,
+    "enabled": false,
+    "entries": {},
+    "order": [],
+    "total_bytes": 0
+  },
+  "metadata": {
+    "creators": [
+      {
+        "affiliations": [
+          {
+            "name": "Genome Editing Innovation Center, Hiroshima University, Higashi-Hiroshima, 739-0046, Japan"
+          }
+        ],
+        "person_or_org": {
+          "family_name": "Nakamae",
+          "given_name": "Kazuki",
+          "identifiers": [
+            {
+              "identifier": "0000-0002-4469-664X",
+              "scheme": "orcid"
+            }
+          ],
+          "name": "Nakamae, Kazuki",
+          "type": "personal"
+        }
+      },
+      {
+        "affiliations": [
+          {
+            "name": "Genome Editing Innovation Center, Hiroshima University, Higashi-Hiroshima, 739-0046, Japan"
+          },
+          {
+            "name": "Graduate School of Integrated Sciences for Life, Hiroshima University, Higashi-Hiroshima, 739-0046, Japan"
+          }
+        ],
+        "person_or_org": {
+          "family_name": "Bono",
+          "given_name": "Hidemasa",
+          "identifiers": [
+            {
+              "identifier": "0000-0003-4413-0651",
+              "scheme": "orcid"
+            }
+          ],
+          "name": "Bono, Hidemasa",
+          "type": "personal"
+        }
+      }
+    ],
+    "description": "<p>tWhEEL is a Docker-oriented pipeline for transcriptome-based protein prediction, similarity-based annotation, SpCas9 guide design, and function-level knockout feasibility assessment. It provides a Gene Ontology (GO-KFI) workflow and an SGD-centered pathway (PW-KFI) workflow.</p>\n<p>Version 1.3.5 corrects GO-KFI report labels and stacked-bar geometry to use exact category counts rather than counts reconstructed from rounded percentages. It also detects missing or inconsistent chart counts and corrects the row label to GO terms. GO-KFI calculation, guide filtering, and pathway analysis are unchanged by this release.</p>\n<p>This archive contains the tracked source tree at tag v1.3.5, commit 77d7a7c9aa14ef1d5fc8e709293ab86999226d8a (tag/source date: 2026-09-27). It does not bundle Docker images, reference databases, LOCAL_DATA, or untracked analysis outputs. Previously tracked Python bytecode and test-report assets are retained to preserve the original tagged tree.</p>\n<p>KFI describes guide-design feasibility, not measured experimental editing efficiency or proven loss of biological function. Genome-backed searches still require intended-locus and exon-context validation. External dependencies and online annotation services are not frozen by this source archive.</p>",
+    "languages": [
+      {
+        "id": "eng",
+        "title": {
+          "en": "English"
+        }
+      }
+    ],
+    "publication_date": "2026-10-26",
+    "publisher": "Zenodo",
+    "related_identifiers": [
+      {
+        "identifier": "https://github.com/KazukiNakamae/tWhEEL/commit/77d7a7c9aa14ef1d5fc8e709293ab86999226d8a",
+        "relation_type": {
+          "id": "isidenticalto",
+          "title": {
+            "de": "Ist identisch mit",
+            "en": "Is identical to"
+          }
+        },
+        "resource_type": {
+          "id": "software",
+          "title": {
+            "de": "Software",
+            "en": "Software"
+          }
+        },
+        "scheme": "url"
+      }
+    ],
+    "resource_type": {
+      "id": "software",
+      "title": {
+        "de": "Software",
+        "en": "Software"
+      }
+    },
+    "rights": [
+      {
+        "description": {
+          "en": "A short and simple permissive license with conditions only requiring preservation of copyright and license notices. Licensed works, modifications, and larger works may be distributed under different terms and without source code."
+        },
+        "id": "mit",
+        "props": {
+          "scheme": "spdx",
+          "url": "https://opensource.org/licenses/MIT"
+        },
+        "title": {
+          "en": "MIT License"
+        }
+      }
+    ],
+    "subjects": [
+      {
+        "subject": "transcriptomics"
+      },
+      {
+        "subject": "CRISPR-Cas9"
+      },
+      {
+        "subject": "guide RNA design"
+      },
+      {
+        "subject": "knockout feasibility"
+      },
+      {
+        "subject": "Gene Ontology"
+      },
+      {
+        "subject": "WikiPathways"
+      }
+    ],
+    "title": "tWhEEL: transcript-aware Whole-genomic Evaluation for Editing Locus",
+    "version": "1.3.5"
+  },
+  "parent": {
+    "access": {
+      "grants": [],
+      "links": [],
+      "owned_by": {
+        "user": "1294843"
+      },
+      "settings": {
+        "accept_conditions_text": null,
+        "allow_guest_requests": false,
+        "allow_user_requests": false,
+        "secret_link_expiration": 0
+      }
+    },
+    "communities": {},
+    "id": "23660612",
+    "pids": {
+      "doi": {
+        "client": "datacite",
+        "identifier": "10.5281/zenodo.23660612",
+        "provider": "datacite"
+      }
+    }
+  },
+  "pids": {
+    "doi": {
+      "client": "datacite",
+      "identifier": "10.5281/zenodo.23660613",
+      "provider": "datacite"
+    },
+    "oai": {
+      "identifier": "oai:zenodo.org:23660613",
+      "provider": "oai"
+    }
+  },
+  "revision_id": 3,
+  "stats": {
+    "all_versions": {
+      "data_volume": 0,
+      "downloads": 0,
+      "unique_downloads": 0,
+      "unique_views": 0,
+      "views": 0
+    },
+    "this_version": {
+      "data_volume": 0,
+      "downloads": 0,
+      "unique_downloads": 0,
+      "unique_views": 0,
+      "views": 0
+    }
+  },
+  "status": "published",
+  "swh": {},
+  "updated": "2026-10-26T08:35:04.619377+00:00",
+  "versions": {
+    "index": 1,
+    "is_latest": true,
+    "is_latest_draft": true
+  }
+}

@@ -1,10 +1,16 @@
 <p align="center">
-  <img src="src/web/static/img/logo.png" alt="tWhEEL logo" width="720">
+  <img src="src/web/static/img/logo.png" alt="tWhEEL logo" width="560">
 </p>
 
 # tWhEEL
 
-**transcript-aware Whole-genomic Evaluation for Editing Locus (tWhEEL)**
+**transcript-aware Whole-genomic Evaluation for Editing Locus**
+
+[![Release](https://img.shields.io/github/v/release/KazukiNakamae/tWhEEL)](https://github.com/KazukiNakamae/tWhEEL/releases/latest)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23660613.svg)](https://doi.org/10.5281/zenodo.23660613)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[Install](#installation) · [Quick start](#quick-start-minimum-de-novo-go-kfi-profile) · [Configuration](#configuration-templates) · [CLI reference](#command-line-usage) · [Cite](#citation)
 
 tWhEEL is a Docker-oriented transcriptome analysis pipeline for protein
 prediction, similarity-based annotation, SpCas9 guide design, and knockout
@@ -24,6 +30,29 @@ The pathway workflow is currently centered on *Saccharomyces cerevisiae*
 because its annotation step uses an SGD reference database. Run the GO and
 pathway workflows in separate output directories: `annotation` and
 `sgd_annotation` intentionally write the same intermediate filenames.
+
+## Start here
+
+| Task | Where to start |
+| --- | --- |
+| Install the archived release | [Installation](#installation) |
+| Run a preliminary transcriptome-only screen | [Quick start](#quick-start-minimum-de-novo-go-kfi-profile) |
+| Use existing proteins or a genome reference | [Configuration templates](#configuration-templates) |
+| Run or regenerate individual steps | [Command-line usage](#command-line-usage) |
+| Read and share analysis reports | [Output layout](#output-layout) |
+| Interpret guide counts and KFI | [Result semantics](#result-semantics) |
+| Diagnose a failed run | [Troubleshooting](#troubleshooting) |
+
+**Current release: [v1.3.5](https://github.com/KazukiNakamae/tWhEEL/releases/tag/v1.3.5).**
+This release corrects GO-KFI report counts and chart geometry. See the
+[report-regeneration note](#go-report-count-correction-in-v135) for existing analyses.
+The [Zenodo archive](https://doi.org/10.5281/zenodo.23660613) preserves the same
+source commit.
+
+> KFI describes guide-design feasibility, not measured editing efficiency or
+> proven loss of gene function. Transcriptome-only runs are preliminary screens.
+> For guide selection and experimental planning, provide a genome reference and
+> validate the retained target locus and exon context.
 
 ## Requirements
 
@@ -46,13 +75,17 @@ the Docker daemon.
 
 ## Installation
 
+The commands below install the published v1.3.5 source. Use a regular clone
+without `--branch v1.3.5 --depth 1` to work on the latest development branch.
+
 ```bash
-git clone https://github.com/KazukiNakamae/tWhEEL.git
+git clone --branch v1.3.5 --depth 1 https://github.com/KazukiNakamae/tWhEEL.git
 cd tWhEEL
 
 conda create -n twheel python=3.12 -y
 conda activate twheel
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python src/twheel.py --version
 ```
 
 The GO helper images may be built before the first run:
@@ -726,15 +759,24 @@ opening; no Flask server is started by the current pipeline.
 
 ## Citation
 
-The repository does not currently provide a finalized publication citation.
-Until one is available, cite the repository URL together with the Git tag or
-commit used and the access date.
+For tWhEEL v1.3.5, cite the published software archive:
+
+Nakamae, K., & Bono, H. (2026). *tWhEEL: transcript-aware Whole-genomic
+Evaluation for Editing Locus* (Version 1.3.5) [Computer software]. Zenodo.
+[https://doi.org/10.5281/zenodo.23660613](https://doi.org/10.5281/zenodo.23660613).
+
+This DOI identifies v1.3.5, not necessarily the current checkout. The
+[all-versions DOI](https://doi.org/10.5281/zenodo.23660612) represents the version
+series. Citation metadata, release notes, archive provenance, and publication
+verification are available in
+[the v1.3.5 archive guide](releases/zenodo/v1.3.5/README.md). The software
+citation does not replace a finalized publication citation.
 
 ## License and support
 
 tWhEEL is distributed under the MIT License; see [LICENSE](LICENSE).
 
-Report reproducible problems through the repository's GitHub Issues page and
+Report reproducible problems through [GitHub Issues](https://github.com/KazukiNakamae/tWhEEL/issues) and
 include the command, configuration (with sensitive paths removed),
 `twheel.log`, and the failing step.
 

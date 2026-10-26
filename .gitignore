@@ -5,6 +5,7 @@
 #Local Data
 LOCAL_DATA
 # Output directory
+/dist/
 outputs/tWhEEL_*
 outputs/benchmarking/
 # transdecoder
