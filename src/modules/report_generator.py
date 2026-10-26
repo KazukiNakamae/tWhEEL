@@ -848,33 +848,57 @@ class ReportGenerator:
                 
                 # Extract detailed counts for chart visualization
                 count_patterns = [
-                    (r'(\d+)\s+Fully targetable GOs \(F\)', 'fully_targetable_count'),
-                    (r'(\d+)\s+Fully and simply targetable GOs \(S\)', 'simply_targetable_count'),
-                    (r'(\d+)\s+Fully and multiply targetable GOs \(M\)', 'multiply_targetable_count'),
-                    (r'(\d+)\s+Partially targetable GOs \(P\)', 'partially_targetable_count'),
-                    (r'(\d+)\s+Not targetable GOs \(N\)', 'not_targetable_count')
+                    (r'Fully targetable GOs \(F\)', 'fully_targetable_count'),
+                    (r'Fully and simply targetable GOs \(S\)', 'simply_targetable_count'),
+                    (r'Fully and multiply targetable GOs \(M\)', 'multiply_targetable_count'),
+                    (r'Partially targetable GOs \(P\)', 'partially_targetable_count'),
+                    (r'Not targetable GOs \(N\)', 'not_targetable_count')
                 ]
                 
                 for pattern, key in count_patterns:
-                    count_match = re.search(pattern, content)
-                    if count_match:
-                        stats[key] = int(count_match.group(1))
+                    # Match an entire integer-count row, not the positive
+                    # suffix of a negative or fractional value. Duplicate or
+                    # missing rows remain unavailable rather than becoming 0.
+                    count_matches = re.findall(
+                        r'^[ \t|]*(\d+)[ \t]+' + pattern + r'[ \t|]*$',
+                        content, re.MULTILINE,
+                    )
+                    if len(count_matches) == 1:
+                        stats[key] = int(count_matches[0])
+
+                # Exact counts drive percentage formatting as well as geometry.
+                # Leave incomplete data detectable by the chart validator.
+                count_keys = [key for _, key in count_patterns]
+                if all(key in stats for key in count_keys):
+                    fully, simply, multiply, partially, not_targetable = (
+                        stats[key] for key in count_keys
+                    )
+                    total = stats['total_gos']
+                    if (simply + multiply == fully
+                            and fully + partially + not_targetable == total):
+                        for key in count_keys:
+                            stats[key.replace('_count', '_percent')] = (
+                                round(100 * stats[key] / total, 1)
+                                if total else 0.0
+                            )
                 
                 # Create chart data for JavaScript
                 stats['chart_data'] = {
                     'fully_targetable': {
                         'percent': stats['fully_targetable_percent'],
-                        'count': stats.get('fully_targetable_count', 0),
+                        'count': stats.get('fully_targetable_count'),
+                        'simply_count': stats.get('simply_targetable_count'),
+                        'multiply_count': stats.get('multiply_targetable_count'),
                         'simply_percent': stats['simply_targetable_percent'],
                         'multiply_percent': stats['multiply_targetable_percent']
                     },
                     'partially_targetable': {
                         'percent': stats['partially_targetable_percent'],
-                        'count': stats.get('partially_targetable_count', 0)
+                        'count': stats.get('partially_targetable_count')
                     },
                     'not_targetable': {
                         'percent': stats['not_targetable_percent'],
-                        'count': stats.get('not_targetable_count', 0)
+                        'count': stats.get('not_targetable_count')
                     },
                     'total': stats['total_gos']
                 }
@@ -4057,16 +4081,41 @@ class tWhEELReport {
         
         const chartData = goStats.chart_data;
         
-        // Create horizontal bar chart using SVG
-        const chartSVG = this.createGOKFIBarChart(chartData);
-        
-        chartContainer.innerHTML = '';
-        chartContainer.appendChild(chartSVG);
-        
-        console.log('GO-KFI chart rendered');
+        try {
+            const chartSVG = this.createGOKFIBarChart(chartData, goStats);
+            chartContainer.innerHTML = '';
+            chartContainer.appendChild(chartSVG);
+            console.log('GO-KFI chart rendered');
+        } catch (error) {
+            console.error('Invalid GO-KFI chart data:', error);
+            chartContainer.innerHTML = '<p class="error">GO-KFI chart data are missing or inconsistent. Exact counts are required; regenerate the report from complete analysis outputs.</p>';
+        }
     }
     
-    createGOKFIBarChart(data) {
+    createGOKFIBarChart(data, goStats = {}) {
+        // Legacy payloads keep exact counts in goStats, outside chart_data.
+        // Never infer counts from rounded percentages or replace missing data
+        // with zero. Reject disagreement between the two exact-count sources.
+        const exactCount = (value, legacyValue, name) => {
+            if (value !== undefined && legacyValue !== undefined && value !== legacyValue) {
+                throw new Error(`Conflicting GO-KFI count: ${name}`);
+            }
+            const count = value === undefined ? legacyValue : value;
+            if (!Number.isSafeInteger(count) || count < 0) {
+                throw new Error(`Missing or invalid GO-KFI count: ${name}`);
+            }
+            return count;
+        };
+        const fullyCount = exactCount(data?.fully_targetable?.count, goStats.fully_targetable_count, 'F');
+        const simplyCount = exactCount(data?.fully_targetable?.simply_count, goStats.simply_targetable_count, 'S');
+        const multiplyCount = exactCount(data?.fully_targetable?.multiply_count, goStats.multiply_targetable_count, 'M');
+        const partiallyCount = exactCount(data?.partially_targetable?.count, goStats.partially_targetable_count, 'P');
+        const notCount = exactCount(data?.not_targetable?.count, goStats.not_targetable_count, 'N');
+        const total = exactCount(data?.total, goStats.total_gos, 'total');
+        if (simplyCount + multiplyCount !== fullyCount || fullyCount + partiallyCount + notCount !== total) {
+            throw new Error('Inconsistent GO-KFI count totals');
+        }
+
         const width = 900;
         const height = 300;
         const margin = { top: 80, right: 50, bottom: 70, left: 80 };
@@ -4086,39 +4135,40 @@ class tWhEELReport {
         const barY = margin.top + (chartHeight - 60) / 2;
         const barHeight = 60;
         
-        // Calculate segment widths based on percentages
-        const simplyPercent = data.fully_targetable.simply_percent || 0;
-        const multiplyPercent = data.fully_targetable.multiply_percent || 0;
-        const partiallyPercent = data.partially_targetable.percent || 0;
-        const notPercent = data.not_targetable.percent || 0;
+        // Preserve full precision for geometry; rounding is only for labels.
+        const percent = count => total > 0 ? 100 * count / total : 0;
+        const simplyPercent = percent(simplyCount);
+        const multiplyPercent = percent(multiplyCount);
+        const partiallyPercent = percent(partiallyCount);
+        const notPercent = percent(notCount);
         
         // Segment data with proper positioning
         const segments = [
             {
                 label: 'Fully (F) and Simply Targetable (S)',
                 percent: simplyPercent,
-                count: Math.round(data.total * simplyPercent / 100),
+                count: simplyCount,
                 color: '#59BF10',
                 x: 0
             },
             {
                 label: 'Fully (F) and Multiply Targetable (M)',
                 percent: multiplyPercent,
-                count: Math.round(data.total * multiplyPercent / 100),
+                count: multiplyCount,
                 color: '#D7DB01',
                 x: (simplyPercent / 100) * chartWidth
             },
             {
                 label: 'Partially Targetable (P)',
                 percent: partiallyPercent,
-                count: data.partially_targetable.count,
+                count: partiallyCount,
                 color: '#F0E579',
                 x: ((simplyPercent + multiplyPercent) / 100) * chartWidth
             },
             {
                 label: 'Not Targetable (N)',
                 percent: notPercent,
-                count: data.not_targetable.count,
+                count: notCount,
                 color: '#D92000',
                 x: ((simplyPercent + multiplyPercent + partiallyPercent) / 100) * chartWidth
             }
@@ -4190,12 +4240,12 @@ class tWhEELReport {
         
         // Y-axis label
         const yLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        yLabel.setAttribute('x', 25);
+        yLabel.setAttribute('x', margin.left / 2);
         yLabel.setAttribute('y', barY + barHeight / 2);
         yLabel.setAttribute('text-anchor', 'middle');
         yLabel.setAttribute('fill', '#333');
         yLabel.setAttribute('font-weight', 'bold');
-        yLabel.textContent = 'Contigs';
+        yLabel.textContent = 'GO terms';
         svg.appendChild(yLabel);
         
         // Draw stacked bar segments
@@ -4224,7 +4274,7 @@ class tWhEELReport {
         text.setAttribute('fill', '#333');
         text.setAttribute('font-weight', 'bold');
         text.setAttribute('font-size', '12px');
-        text.textContent = `F:${data.fully_targetable.count} [S:${segments[0].count}, M:${segments[1].count}, P:${segments[2].count}, N:${segments[3].count}, n:${data.total}]`;
+        text.textContent = `F:${fullyCount} [S:${simplyCount}, M:${multiplyCount}, P:${partiallyCount}, N:${notCount}, n:${total}]`;
         svg.appendChild(text);
         
         // X-axis scale
